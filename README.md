@@ -3,6 +3,8 @@
 > **⚡ 99.9% AI-Powered Development**
 > 이 프로젝트는 [Claude Code](https://claude.ai/code)와 **Vibe Coding**으로 거의 전체가 구현되었습니다.
 
+> **🔗 Live Demo**: [https://grey-portfolio.streamlit.app/](https://grey-portfolio.streamlit.app/)
+
 ---
 
 한국(KRW)과 미국(USD) 주식 투자를 추적하는 **멀티 계좌 포트폴리오 관리 웹 애플리케이션**입니다.
