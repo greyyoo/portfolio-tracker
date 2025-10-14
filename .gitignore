@@ -1,0 +1,81 @@
+# ============================================
+# Python
+# ============================================
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ============================================
+# Environment Variables (CRITICAL - Contains Supabase credentials)
+# ============================================
+.env
+.env.local
+.env.*.local
+
+# ============================================
+# Supabase
+# ============================================
+supabase/.temp/
+supabase/.branches/
+.supabase/
+
+# ============================================
+# IDE & Editors
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================
+# Streamlit
+# ============================================
+.streamlit/
+.streamlit/secrets.toml
+
+# ============================================
+# OS Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================
+# Logs & Temporary Files
+# ============================================
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ============================================
+# Old/Backup Files
+# ============================================
+*_old.py
+*_backup.py
+*.bak
+
+# ============================================
+# Archive Directories (for local development only)
+# ============================================
+sql_archive/
+docs_archive/
+
+# ============================================
+# Development Documentation (for local development only)
+# ============================================
+CLAUDE.md

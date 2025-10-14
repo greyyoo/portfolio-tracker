@@ -1,0 +1,5 @@
+account_id,transaction_type,currency,amount,transaction_date,description
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],DEPOSIT,KRW,10000000,2025-01-15,Additional investment
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],WITHDRAWAL,USD,5000,2025-02-20,Profit withdrawal
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],RP_INTEREST,KRW,25000,2025-10-14,Daily RP interest income
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],RP_INTEREST,USD,15,2025-10-14,RP interest (USD account)
