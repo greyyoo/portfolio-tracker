@@ -2,7 +2,6 @@
 
 > **⚡ 99.9% AI-Powered Development**
 > 이 프로젝트는 [Claude Code](https://claude.ai/code)와 **Vibe Coding**으로 거의 전체가 구현되었습니다.
-> 자연어 대화만으로 전문적인 풀스택 애플리케이션을 만들 수 있다는 것을 보여주는 실제 사례입니다.
 
 ---
 
