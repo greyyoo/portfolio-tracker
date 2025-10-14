@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.1.1] - 2025-10-14
+
+### 🔧 Fixed
+
+- **Streamlit Cloud Deployment Support**: Added support for Streamlit Secrets (TOML format)
+  - `config.py` now reads from Streamlit Secrets (`st.secrets`) for cloud deployment
+  - Falls back to `.env` file for local development
+  - Priority: Streamlit Secrets > Environment Variables
+  - Enables seamless deployment on Streamlit Cloud
+
+---
+
 ## [0.1.0] - 2025-10-14
 
 ### 🎉 Initial Public Release
