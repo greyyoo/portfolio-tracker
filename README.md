@@ -66,7 +66,7 @@ Streamlit 기반의 대시보드로 5개의 독립된 투자 계좌를 관리하
 ### 1️⃣ Repository Clone
 
 ```bash
-git clone https://github.com/[YOUR_USERNAME]/trading-portfolio-tracker.git
+git clone https://github.com/greyyoo/portfolio-tracker.git
 cd trading-portfolio-tracker
 ```
 
