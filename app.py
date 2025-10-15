@@ -44,9 +44,15 @@ from currency_utils import (
 )
 from exchange_rate import (
     get_usd_krw_rate,
-    get_exchange_rate_info,
-    get_historical_usd_krw_rate
+    get_exchange_rate_info
 )
+
+# Try to import historical exchange rate function (may not be available in older versions)
+try:
+    from exchange_rate import get_historical_usd_krw_rate
+except ImportError:
+    # Fallback: use current rate for historical lookups
+    get_historical_usd_krw_rate = lambda date: get_usd_krw_rate()
 from charts import (
     create_price_chart_with_transactions
 )
