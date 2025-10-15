@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS market_indices (
     spx_close NUMERIC(10, 2),
     ndx_close NUMERIC(10, 2),
     kospi_close NUMERIC(10, 2),
+    usd_krw_rate NUMERIC(10, 4),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -189,24 +190,24 @@ DECLARE
     v_baseline NUMERIC;
     v_value_change NUMERIC;
     v_change_pct NUMERIC;
+    v_account_number INTEGER;
 BEGIN
     v_total_value := p_stock_value + p_cash_balance;
 
-    -- Use provided baseline or fetch from first snapshot
-    IF p_baseline_value IS NOT NULL THEN
-        v_baseline := p_baseline_value;
-    ELSE
-        SELECT baseline_value INTO v_baseline
-        FROM portfolio_snapshots
-        WHERE account_id = p_account_id
-          AND currency = p_currency
-        ORDER BY snapshot_date ASC
-        LIMIT 1;
+    -- Get account number
+    SELECT account_number INTO v_account_number
+    FROM accounts
+    WHERE id = p_account_id;
 
-        IF v_baseline IS NULL THEN
-            v_baseline := v_total_value;
-        END IF;
-    END IF;
+    -- Determine baseline value using FIXED values per account
+    CASE v_account_number
+        WHEN 1 THEN v_baseline := 20000;           -- USD
+        WHEN 2 THEN v_baseline := 10000000;        -- KRW
+        WHEN 3 THEN v_baseline := 4000;            -- USD
+        WHEN 4 THEN v_baseline := 4000;            -- KRW or USD (모두 4000)
+        WHEN 5 THEN v_baseline := 4000;            -- USD or KRW (모두 4000)
+        ELSE v_baseline := v_total_value;          -- fallback
+    END CASE;
 
     -- Calculate change
     v_value_change := v_total_value - v_baseline;
@@ -236,8 +237,7 @@ BEGIN
         baseline_value = EXCLUDED.baseline_value,
         value_change = EXCLUDED.value_change,
         change_pct = EXCLUDED.change_pct,
-        exchange_rate = COALESCE(EXCLUDED.exchange_rate, portfolio_snapshots.exchange_rate),
-        updated_at = NOW()
+        exchange_rate = COALESCE(EXCLUDED.exchange_rate, portfolio_snapshots.exchange_rate)
     RETURNING id INTO v_snapshot_id;
 
     RETURN v_snapshot_id;
@@ -249,23 +249,57 @@ CREATE OR REPLACE FUNCTION upsert_market_indices(
     p_snapshot_date DATE,
     p_spx_close NUMERIC DEFAULT NULL,
     p_ndx_close NUMERIC DEFAULT NULL,
-    p_kospi_close NUMERIC DEFAULT NULL
+    p_kospi_close NUMERIC DEFAULT NULL,
+    p_usd_krw_rate NUMERIC DEFAULT NULL
 )
 RETURNS UUID AS $$
 DECLARE
     v_id UUID;
 BEGIN
-    INSERT INTO market_indices (snapshot_date, spx_close, ndx_close, kospi_close)
-    VALUES (p_snapshot_date, p_spx_close, p_ndx_close, p_kospi_close)
+    INSERT INTO market_indices (snapshot_date, spx_close, ndx_close, kospi_close, usd_krw_rate)
+    VALUES (p_snapshot_date, p_spx_close, p_ndx_close, p_kospi_close, p_usd_krw_rate)
     ON CONFLICT (snapshot_date)
     DO UPDATE SET
         spx_close = COALESCE(EXCLUDED.spx_close, market_indices.spx_close),
         ndx_close = COALESCE(EXCLUDED.ndx_close, market_indices.ndx_close),
         kospi_close = COALESCE(EXCLUDED.kospi_close, market_indices.kospi_close),
+        usd_krw_rate = COALESCE(EXCLUDED.usd_krw_rate, market_indices.usd_krw_rate),
         updated_at = NOW()
     RETURNING snapshot_date INTO v_id;
 
     RETURN v_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Calculate cash balance for a specific account, currency, and date
+CREATE OR REPLACE FUNCTION calculate_cash_balance(
+    p_account_id UUID,
+    p_currency TEXT,
+    p_date DATE
+)
+RETURNS NUMERIC AS $$
+DECLARE
+    v_initial_seed NUMERIC;
+    v_cash_balance NUMERIC;
+BEGIN
+    -- Get initial seed money
+    IF p_currency = 'KRW' THEN
+        SELECT initial_seed_money_krw INTO v_initial_seed
+        FROM accounts WHERE id = p_account_id;
+    ELSE
+        SELECT initial_seed_money_usd INTO v_initial_seed
+        FROM accounts WHERE id = p_account_id;
+    END IF;
+
+    -- Calculate cash balance
+    v_cash_balance := COALESCE(v_initial_seed, 0)
+        + COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'DEPOSIT' AND transaction_date <= p_date), 0)
+        + COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'RP_INTEREST' AND transaction_date <= p_date), 0)
+        - COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'WITHDRAWAL' AND transaction_date <= p_date), 0)
+        - COALESCE((SELECT SUM((trade_price * quantity) + COALESCE(fee, 0)) FROM transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'BUY' AND transaction_date <= p_date), 0)
+        + COALESCE((SELECT SUM((trade_price * quantity) - COALESCE(fee, 0)) FROM transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'SELL' AND transaction_date <= p_date), 0);
+
+    RETURN v_cash_balance;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -333,201 +367,136 @@ $$ LANGUAGE plpgsql;
 -- Recalculate snapshots for a date range
 CREATE OR REPLACE FUNCTION recalculate_snapshots(
     p_start_date DATE,
-    p_end_date DATE DEFAULT CURRENT_DATE,
-    p_account_id UUID DEFAULT NULL
+    p_end_date DATE DEFAULT NULL
 )
-RETURNS TABLE (
-    recalculated_date DATE,
-    result_account_id UUID,
-    result_currency TEXT,
-    result_snapshot_id UUID
-) AS $$
+RETURNS TABLE(snapshot_id UUID, account_name TEXT, snapshot_date DATE, currency TEXT) AS $$
 DECLARE
-    v_account RECORD;
+    v_end_date DATE;
     v_date DATE;
+    v_account RECORD;
+    v_snapshot_id UUID;
     v_stock_value NUMERIC;
     v_cash_balance NUMERIC;
     v_exchange_rate NUMERIC;
-    v_snapshot_id UUID;
 BEGIN
-    -- Validate date range
-    IF p_start_date > p_end_date THEN
-        RAISE EXCEPTION 'Start date must be before or equal to end date';
-    END IF;
+    -- Default end date to start date if not provided
+    v_end_date := COALESCE(p_end_date, p_start_date);
 
-    -- Get exchange rate (use latest available or 1300 as fallback)
-    SELECT COALESCE(
-        (SELECT current_price FROM stock_prices WHERE ticker = 'KRW=X' AND is_active = true LIMIT 1),
-        1300
-    ) INTO v_exchange_rate;
+    -- Loop through each date in range
+    v_date := p_start_date;
+    WHILE v_date <= v_end_date LOOP
+        -- Get exchange rate for this specific date from market_indices
+        -- Priority: 1) Existing snapshot, 2) market_indices for date, 3) Latest market_indices value
+        SELECT ps.exchange_rate INTO v_exchange_rate
+        FROM portfolio_snapshots ps
+        WHERE ps.snapshot_date = v_date
+          AND ps.exchange_rate IS NOT NULL
+        LIMIT 1;
 
-    -- Loop through each account (or specific account if provided)
-    FOR v_account IN
-        SELECT a.id, a.initial_seed_money_krw, a.initial_seed_money_usd, a.allowed_currencies
-        FROM accounts a
-        WHERE (p_account_id IS NULL OR a.id = p_account_id)
-          AND a.is_active = true
-    LOOP
-        -- Loop through each date in range
-        v_date := p_start_date;
-        WHILE v_date <= p_end_date LOOP
-            -- Process each currency for this account
+        -- If no saved exchange rate, get from market_indices for this date
+        IF v_exchange_rate IS NULL THEN
+            SELECT mi.usd_krw_rate INTO v_exchange_rate
+            FROM market_indices mi
+            WHERE mi.snapshot_date = v_date
+              AND mi.usd_krw_rate IS NOT NULL
+            LIMIT 1;
+        END IF;
+
+        -- If still no rate (market not open that day), get most recent available rate
+        IF v_exchange_rate IS NULL THEN
+            SELECT mi.usd_krw_rate INTO v_exchange_rate
+            FROM market_indices mi
+            WHERE mi.snapshot_date <= v_date
+              AND mi.usd_krw_rate IS NOT NULL
+            ORDER BY mi.snapshot_date DESC
+            LIMIT 1;
+        END IF;
+
+        -- Final fallback if no historical data exists
+        IF v_exchange_rate IS NULL THEN
+            v_exchange_rate := 1420;
+        END IF;
+        -- Process each active account
+        FOR v_account IN
+            SELECT a.id, a.account_name, a.allowed_currencies
+            FROM accounts a
+            WHERE a.is_active = true
+        LOOP
+            -- Process KRW currency if allowed
             IF 'KRW' = ANY(v_account.allowed_currencies) THEN
-                -- Calculate KRW stock value at this date
+                -- Calculate stock value for KRW holdings at this date
                 SELECT COALESCE(SUM(
                     CASE
-                        WHEN net_qty > 0 THEN net_qty * COALESCE(pc.current_price, 0)
-                        ELSE 0
+                        WHEN t.transaction_type = 'BUY' THEN sp.current_price * t.quantity
+                        WHEN t.transaction_type = 'SELL' THEN -sp.current_price * t.quantity
                     END
-                ), 0)
-                INTO v_stock_value
-                FROM (
-                    SELECT
-                        t.ticker,
-                        SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE -t.quantity END) as net_qty
-                    FROM transactions t
-                    WHERE t.account_id = v_account.id
-                      AND t.currency = 'KRW'
-                      AND t.transaction_date <= v_date
-                    GROUP BY t.ticker
-                ) holdings
-                LEFT JOIN stock_prices pc ON holdings.ticker = pc.ticker;
+                ), 0) INTO v_stock_value
+                FROM transactions t
+                LEFT JOIN stock_prices sp ON t.ticker = sp.ticker
+                WHERE t.account_id = v_account.id
+                  AND t.currency = 'KRW'
+                  AND t.transaction_date <= v_date;
 
-                -- Calculate KRW cash balance at this date
-                v_cash_balance := v_account.initial_seed_money_krw
-                    + COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'KRW'
-                          AND ct.transaction_type = 'DEPOSIT'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    + COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'KRW'
-                          AND ct.transaction_type = 'RP_INTEREST'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    - COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'KRW'
-                          AND ct.transaction_type = 'WITHDRAWAL'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    - COALESCE((
-                        SELECT SUM((t.trade_price * t.quantity) + COALESCE(t.fee, 0))
-                        FROM transactions t
-                        WHERE t.account_id = v_account.id
-                          AND t.currency = 'KRW'
-                          AND t.transaction_type = 'BUY'
-                          AND t.transaction_date <= v_date
-                    ), 0)
-                    + COALESCE((
-                        SELECT SUM((t.trade_price * t.quantity) - COALESCE(t.fee, 0))
-                        FROM transactions t
-                        WHERE t.account_id = v_account.id
-                          AND t.currency = 'KRW'
-                          AND t.transaction_type = 'SELL'
-                          AND t.transaction_date <= v_date
-                    ), 0);
+                -- Calculate cash balance (using database function)
+                SELECT calculate_cash_balance(v_account.id, 'KRW', v_date) INTO v_cash_balance;
 
-                -- Capture KRW snapshot
+                -- Capture snapshot for KRW
                 SELECT capture_portfolio_snapshot(
                     v_account.id,
                     v_date,
                     'KRW',
                     v_stock_value,
                     v_cash_balance,
-                    v_exchange_rate
+                    NULL,  -- p_baseline_value (let function determine)
+                    v_exchange_rate  -- p_exchange_rate
                 ) INTO v_snapshot_id;
 
-                RETURN QUERY SELECT v_date AS recalculated_date, v_account.id AS result_account_id, 'KRW'::TEXT AS result_currency, v_snapshot_id AS result_snapshot_id;
+                snapshot_id := v_snapshot_id;
+                account_name := v_account.account_name;
+                snapshot_date := v_date;
+                currency := 'KRW';
+                RETURN NEXT;
             END IF;
 
+            -- Process USD currency if allowed
             IF 'USD' = ANY(v_account.allowed_currencies) THEN
-                -- Calculate USD stock value at this date
+                -- Calculate stock value for USD holdings at this date
                 SELECT COALESCE(SUM(
                     CASE
-                        WHEN net_qty > 0 THEN net_qty * COALESCE(pc.current_price, 0)
-                        ELSE 0
+                        WHEN t.transaction_type = 'BUY' THEN sp.current_price * t.quantity
+                        WHEN t.transaction_type = 'SELL' THEN -sp.current_price * t.quantity
                     END
-                ), 0)
-                INTO v_stock_value
-                FROM (
-                    SELECT
-                        t.ticker,
-                        SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE -t.quantity END) as net_qty
-                    FROM transactions t
-                    WHERE t.account_id = v_account.id
-                      AND t.currency = 'USD'
-                      AND t.transaction_date <= v_date
-                    GROUP BY t.ticker
-                ) holdings
-                LEFT JOIN stock_prices pc ON holdings.ticker = pc.ticker;
+                ), 0) INTO v_stock_value
+                FROM transactions t
+                LEFT JOIN stock_prices sp ON t.ticker = sp.ticker
+                WHERE t.account_id = v_account.id
+                  AND t.currency = 'USD'
+                  AND t.transaction_date <= v_date;
 
-                -- Calculate USD cash balance at this date
-                v_cash_balance := v_account.initial_seed_money_usd
-                    + COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'USD'
-                          AND ct.transaction_type = 'DEPOSIT'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    + COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'USD'
-                          AND ct.transaction_type = 'RP_INTEREST'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    - COALESCE((
-                        SELECT SUM(ct.amount)
-                        FROM cash_transactions ct
-                        WHERE ct.account_id = v_account.id
-                          AND ct.currency = 'USD'
-                          AND ct.transaction_type = 'WITHDRAWAL'
-                          AND ct.transaction_date <= v_date
-                    ), 0)
-                    - COALESCE((
-                        SELECT SUM((t.trade_price * t.quantity) + COALESCE(t.fee, 0))
-                        FROM transactions t
-                        WHERE t.account_id = v_account.id
-                          AND t.currency = 'USD'
-                          AND t.transaction_type = 'BUY'
-                          AND t.transaction_date <= v_date
-                    ), 0)
-                    + COALESCE((
-                        SELECT SUM((t.trade_price * t.quantity) - COALESCE(t.fee, 0))
-                        FROM transactions t
-                        WHERE t.account_id = v_account.id
-                          AND t.currency = 'USD'
-                          AND t.transaction_type = 'SELL'
-                          AND t.transaction_date <= v_date
-                    ), 0);
+                -- Calculate cash balance (using database function)
+                SELECT calculate_cash_balance(v_account.id, 'USD', v_date) INTO v_cash_balance;
 
-                -- Capture USD snapshot
+                -- Capture snapshot for USD
                 SELECT capture_portfolio_snapshot(
                     v_account.id,
                     v_date,
                     'USD',
                     v_stock_value,
                     v_cash_balance,
-                    v_exchange_rate
+                    NULL,  -- p_baseline_value (let function determine)
+                    v_exchange_rate  -- p_exchange_rate (reference value)
                 ) INTO v_snapshot_id;
 
-                RETURN QUERY SELECT v_date AS recalculated_date, v_account.id AS result_account_id, 'USD'::TEXT AS result_currency, v_snapshot_id AS result_snapshot_id;
+                snapshot_id := v_snapshot_id;
+                account_name := v_account.account_name;
+                snapshot_date := v_date;
+                currency := 'USD';
+                RETURN NEXT;
             END IF;
-
-            v_date := v_date + INTERVAL '1 day';
         END LOOP;
+
+        -- Move to next date
+        v_date := v_date + INTERVAL '1 day';
     END LOOP;
 
     RETURN;

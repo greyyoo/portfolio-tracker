@@ -44,7 +44,8 @@ from currency_utils import (
 )
 from exchange_rate import (
     get_usd_krw_rate,
-    get_exchange_rate_info
+    get_exchange_rate_info,
+    get_historical_usd_krw_rate
 )
 from charts import (
     create_price_chart_with_transactions
@@ -1340,16 +1341,19 @@ def show_statistics_page(supabase: Client):
     st.markdown("---")
     st.markdown("### 💰 원금 vs 계좌평가액")
     st.caption("계좌별 원금(입출금만 반영)과 계좌평가액(주식+현금)의 시계열 추이")
-    st.info("ℹ️ USD 계좌는 일일 환율 변동을 반영하여 원화로 표시하므로 원금에 변동이 있는 것으로 보일 수 있습니다.")
+    st.info("ℹ️ 개별 계좌는 각 계좌의 원래 통화로 표시되며, 전체 포트폴리오는 일별 실제 환율을 반영하여 KRW로 통합 표시됩니다.")
 
     if not portfolio_snapshots.empty and not accounts_df.empty:
-        # 계좌별 차트 생성
+        # 계좌별 차트 생성 (각 계좌의 원래 통화로 표시)
         account_charts_data = []
+        # 전체 포트폴리오용 데이터 (일별 환율 반영하여 KRW로 통합)
+        total_portfolio_data = {}
 
         for _, acc in accounts_df.iterrows():
             account_id = acc['id']
             account_number = acc['account_number']
             account_name = f"계좌 {account_number}"
+            allowed_currencies = acc['allowed_currencies']
 
             # 해당 계좌의 스냅샷 데이터
             account_snapshots = portfolio_snapshots[portfolio_snapshots['account_id'] == account_id].copy()
@@ -1364,20 +1368,24 @@ def show_statistics_page(supabase: Client):
                 initial_seed_krw = acc['initial_seed_money_krw']
                 initial_seed_usd = acc['initial_seed_money_usd']
 
-                # 날짜별로 KRW + USD 합산
+                # 계좌의 주 통화 결정 (allowed_currencies에서 첫 번째)
+                primary_currency = allowed_currencies[0] if allowed_currencies else 'KRW'
+
+                # 개별 계좌 차트용: 주 통화 기준
                 account_by_date = {}
 
                 for date, group in account_snapshots.groupby('snapshot_date'):
-                    # exchange_rate 가져오기 (USD → KRW 변환용)
-                    # 해당 날짜 그룹에서 첫 번째 exchange_rate 사용
-                    exchange_rate = get_usd_krw_rate()  # 실시간 환율을 기본값으로
+                    # exchange_rate 가져오기 (해당 날짜의 실제 환율)
+                    # 1. 스냅샷에 저장된 환율 우선 사용
+                    exchange_rate = None
                     if 'exchange_rate' in group.columns:
                         valid_rates = group['exchange_rate'].dropna()
                         if len(valid_rates) > 0:
                             exchange_rate = float(valid_rates.iloc[0])
-                        else:
-                            # 스냅샷에 환율 데이터가 없으면 실시간 환율 사용
-                            exchange_rate = get_usd_krw_rate()
+
+                    # 2. 스냅샷에 없으면 해당 날짜의 과거 환율 조회
+                    if exchange_rate is None:
+                        exchange_rate = get_historical_usd_krw_rate(date)
 
                     # 원금 계산 (초기 시드 + 입금 - 출금, RP 이자 및 주식 투자 제외)
                     principal_krw = 0
@@ -1403,11 +1411,9 @@ def show_statistics_page(supabase: Client):
                         principal_krw = initial_seed_krw
                         principal_usd = initial_seed_usd
 
-                    # KRW로 통합 (USD → KRW 변환)
-                    principal = principal_krw + (principal_usd * exchange_rate)
-
-                    # 계좌 평가액 계산 (통화별 합산 후 KRW로 변환)
+                    # 계좌 평가액 계산 (통화별 합산)
                     total_value_krw = 0
+                    total_value_usd = 0
 
                     for _, row in group.iterrows():
                         currency = row['currency']
@@ -1416,17 +1422,36 @@ def show_statistics_page(supabase: Client):
                         if currency == 'KRW':
                             total_value_krw += total_val
                         else:  # USD
-                            total_value_krw += total_val * exchange_rate
+                            total_value_usd += total_val
 
-                    account_by_date[date] = {
-                        'total_value': total_value_krw,  # 계좌 평가액 (주식 + 현금, KRW 변환)
-                        'principal': principal            # 원금 (초기 시드 + 입금 - 출금, KRW 변환)
-                    }
+                    # 개별 계좌 차트: 주 통화 기준으로 저장
+                    if primary_currency == 'USD':
+                        # USD 계좌: USD로 표시
+                        account_by_date[date] = {
+                            'total_value': total_value_usd + (total_value_krw / exchange_rate),
+                            'principal': principal_usd + (principal_krw / exchange_rate),
+                            'currency': 'USD'
+                        }
+                    else:
+                        # KRW 계좌: KRW로 표시
+                        account_by_date[date] = {
+                            'total_value': total_value_krw + (total_value_usd * exchange_rate),
+                            'principal': principal_krw + (principal_usd * exchange_rate),
+                            'currency': 'KRW'
+                        }
+
+                    # 전체 포트폴리오용: 일별 환율 반영하여 KRW로 통합
+                    if date not in total_portfolio_data:
+                        total_portfolio_data[date] = {'total_value': 0, 'principal': 0}
+
+                    total_portfolio_data[date]['total_value'] += total_value_krw + (total_value_usd * exchange_rate)
+                    total_portfolio_data[date]['principal'] += principal_krw + (principal_usd * exchange_rate)
 
                 account_charts_data.append({
                     'account_name': account_name,
                     'account_number': account_number,
-                    'data': account_by_date
+                    'data': account_by_date,
+                    'currency': primary_currency
                 })
 
         # 계좌별 차트 표시 (2-column 레이아웃)
@@ -1440,6 +1465,7 @@ def show_statistics_page(supabase: Client):
                         dates = sorted(chart_data['data'].keys())
                         total_values = [chart_data['data'][d]['total_value'] for d in dates]
                         principals = [chart_data['data'][d]['principal'] for d in dates]
+                        currency = chart_data['currency']
 
                         # DataFrame 생성
                         chart_df = pd.DataFrame({
@@ -1448,6 +1474,14 @@ def show_statistics_page(supabase: Client):
                             'Value': total_values + principals
                         })
 
+                        # 통화에 따른 레이블 및 포맷
+                        if currency == 'USD':
+                            value_label = '금액 (USD)'
+                            tick_format = "$,.0f" if max(total_values + principals) >= 1000 else "$,.2f"
+                        else:
+                            value_label = '금액 (KRW)'
+                            tick_format = ",.0f"
+
                         # Plotly 차트
                         fig_account = px.line(
                             chart_df,
@@ -1455,7 +1489,7 @@ def show_statistics_page(supabase: Client):
                             y='Value',
                             color='Type',
                             title=chart_data['account_name'],
-                            labels={'Date': '날짜', 'Value': '금액 (KRW)', 'Type': '구분'},
+                            labels={'Date': '날짜', 'Value': value_label, 'Type': '구분'},
                             color_discrete_map={'계좌평가액': '#2e7d32', '원금': '#1976d2'}
                         )
 
@@ -1472,28 +1506,18 @@ def show_statistics_page(supabase: Client):
                         )
 
                         fig_account.update_xaxes(tickformat="%Y-%m-%d")
-                        fig_account.update_yaxes(tickformat=",.0f")
+                        fig_account.update_yaxes(tickformat=tick_format)
 
                         st.plotly_chart(fig_account, use_container_width=True)
 
-            # 전체 포트폴리오 차트 (full-width)
-            st.markdown("#### 전체 포트폴리오")
+            # 전체 포트폴리오 차트 (full-width) - 일별 환율 반영
+            st.markdown("#### 전체 포트폴리오 (일별 환율 반영)")
 
-            # 전체 데이터 합산
-            total_by_date = {}
-
-            for chart_data in account_charts_data:
-                for date, values in chart_data['data'].items():
-                    if date not in total_by_date:
-                        total_by_date[date] = {'total_value': 0, 'principal': 0}
-
-                    total_by_date[date]['total_value'] += values['total_value']
-                    total_by_date[date]['principal'] += values['principal']
-
+            # 전체 포트폴리오 데이터는 이미 계산됨 (total_portfolio_data)
             # 데이터 준비
-            dates = sorted(total_by_date.keys())
-            total_values = [total_by_date[d]['total_value'] for d in dates]
-            principals = [total_by_date[d]['principal'] for d in dates]
+            dates = sorted(total_portfolio_data.keys())
+            total_values = [total_portfolio_data[d]['total_value'] for d in dates]
+            principals = [total_portfolio_data[d]['principal'] for d in dates]
 
             # DataFrame 생성
             total_chart_df = pd.DataFrame({

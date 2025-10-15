@@ -37,6 +37,48 @@ def get_usd_krw_rate() -> float:
         return 1300.0
 
 
+@st.cache_data(ttl=3600)  # 1시간 캐싱 (과거 데이터는 변하지 않음)
+def get_historical_usd_krw_rate(date: str) -> float:
+    """
+    특정 날짜의 USD/KRW 환율 조회
+
+    Args:
+        date: 날짜 (YYYY-MM-DD 형식 또는 datetime 객체)
+
+    Returns:
+        float: 해당 날짜의 환율 (1 USD = X KRW)
+    """
+    try:
+        # datetime 객체를 문자열로 변환
+        if hasattr(date, 'strftime'):
+            date_str = date.strftime('%Y-%m-%d')
+        else:
+            date_str = str(date)
+
+        # yfinance로 특정 날짜의 환율 조회
+        ticker = yf.Ticker("KRW=X")
+
+        # 해당 날짜 전후로 조회 (주말/공휴일 대비)
+        from datetime import datetime, timedelta
+        target_date = datetime.strptime(date_str, '%Y-%m-%d')
+        start_date = (target_date - timedelta(days=3)).strftime('%Y-%m-%d')
+        end_date = (target_date + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        data = ticker.history(start=start_date, end=end_date)
+
+        if not data.empty:
+            # 가장 가까운 날짜의 종가 사용
+            closest_rate = data['Close'].iloc[-1]
+            return float(closest_rate)
+        else:
+            # 과거 데이터를 가져오지 못한 경우 현재 환율 사용
+            return get_usd_krw_rate()
+
+    except Exception as e:
+        # 에러 발생 시 현재 환율 사용
+        return get_usd_krw_rate()
+
+
 def convert_usd_to_krw(usd_amount: float, exchange_rate: float) -> float:
     """
     USD를 KRW로 변환

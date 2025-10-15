@@ -273,12 +273,13 @@ async function capturePortfolioSnapshots(
       p_spx_close: marketIndices.spx,
       p_ndx_close: marketIndices.ndx,
       p_kospi_close: marketIndices.kospi,
+      p_usd_krw_rate: exchangeRate,
     });
 
     if (indicesError) {
       console.error("Error storing market indices:", indicesError);
     } else {
-      console.log(`Market indices stored for ${utcDate}`);
+      console.log(`Market indices stored for ${utcDate} (including exchange rate: ${exchangeRate})`);
     }
   } catch (error) {
     console.error("Exception storing market indices:", error);

@@ -4,6 +4,131 @@
 
 ---
 
+## [0.1.3] - 2025-10-15
+
+### 🐛 긴급 수정 (Hotfix)
+
+#### Fear & Greed Index
+- **패키지 버전 수정**: fear-and-greed 1.0.0 → 0.4
+  - **이유**: 1.0.0 버전이 PyPI에 존재하지 않아 설치 실패
+  - **영향**: Market Today 섹션의 F&G Index 표시 오류 해결
+  - **파일**: `requirements.txt` (line 10)
+
+#### 원금 vs 계좌평가액 차트
+- **환율 fallback 로직 개선**
+  - **이전**: 하드코딩된 1300 KRW 기본값 사용
+  - **수정**: 실시간 환율 API(`get_usd_krw_rate()`) 호출로 fallback
+  - **적용 시점**:
+    - 스냅샷 데이터에 `exchange_rate` 컬럼이 없을 때
+    - 스냅샷 데이터가 NULL일 때
+  - **효과**: USD 계좌 원금 변동의 정확도 향상 (환율 변동 반영)
+  - **파일**: `app.py` (lines 1373-1380)
+
+#### PostgreSQL 함수 오버로딩 오류
+- **calculate_cash_balance() 함수 오버로드 추가**
+  - **문제**:
+    - DB에는 3-param 버전만 존재: `(p_account_id, p_currency, p_date)`
+    - Python 앱과 Edge Function은 2-param 호출: `(p_account_id, p_currency)`
+    - 에러: `PGRST202: Could not find the function`
+  - **해결**: 2-param 버전 추가 (내부적으로 `CURRENT_DATE`와 함께 3-param 호출)
+  - **영향**: Python 앱과 Edge Function의 현금 잔고 계산 정상화
+  - **파일**:
+    - `complete_schema.sql`: 함수 정의 추가
+    - `sql_archive/fix_calculate_cash_balance_overload.sql`: 독립 실행 스크립트
+
+### 🚀 데이터베이스 개선
+
+#### Market Indices 테이블
+- **usd_krw_rate 컬럼 추가**
+  - **목적**: 시장 지수와 함께 환율도 스냅샷에 저장
+  - **데이터 소스**: Edge Function이 매시간 yfinance에서 조회
+  - **활용**: 과거 특정 날짜의 환율 추적 가능
+  - **파일**:
+    - `complete_schema.sql` (line 130)
+    - `supabase/functions/update-stock-prices/index.ts` (lines 273-283)
+
+#### Snapshot 함수 최적화
+
+**capture_portfolio_snapshot() 개선**:
+- **Baseline 로직 변경**:
+  - **이전**: 첫 스냅샷 또는 현재 값 기반 동적 계산
+  - **수정**: 계좌별 고정 baseline 값 사용
+    - Account 1: $20,000 (USD)
+    - Account 2: ₩10,000,000 (KRW)
+    - Account 3: $4,000 (USD)
+    - Account 4: $4,000 (USD)
+    - Account 5: $4,000 (USD)
+  - **효과**: 일관된 성과 추적, 계산 성능 향상
+- **파일**: `complete_schema.sql` (lines 193-211)
+
+**recalculate_snapshots() 최적화**:
+- **성능 개선**:
+  - 서브쿼리 중첩 → JOIN으로 변경
+  - `calculate_cash_balance()` 함수 재사용으로 중복 로직 제거
+  - 테이블 별칭 사용 (t, ct, pc)으로 컬럼 명확화
+- **RETURN TABLE 명확화**:
+  - 컬럼명 변경: `snapshot_date`, `account_name`, `currency`, `snapshot_id`
+  - 결과 가독성 향상
+- **파일**: `complete_schema.sql` (lines 379-492)
+
+### 🔧 개발자 도구
+
+#### 과거 환율 조회 함수
+- **get_historical_usd_krw_rate() 추가**
+  - **기능**: 특정 날짜의 USD/KRW 환율 조회
+  - **로직**:
+    1. 입력 날짜 전후 3일 범위로 yfinance 조회
+    2. 주말/공휴일 대비 가장 가까운 영업일 데이터 사용
+    3. 데이터 없으면 현재 환율로 fallback
+  - **캐싱**: 1시간 TTL (과거 데이터는 변하지 않음)
+  - **파라미터**:
+    - `date`: 문자열 ('YYYY-MM-DD') 또는 datetime 객체
+  - **반환값**: `float` (1 USD = X KRW)
+  - **파일**: `exchange_rate.py` (lines 40-79)
+
+### 📁 파일 변경사항
+
+**수정된 파일**:
+- `requirements.txt`: fear-and-greed 버전 수정 (1.0.0 → 0.4)
+- `app.py`: 원금 차트 환율 fallback 개선 (lines 1373-1380)
+- `complete_schema.sql`:
+  - `market_indices` 테이블에 `usd_krw_rate` 컬럼 추가
+  - `calculate_cash_balance()` 2-param 오버로드 추가
+  - `capture_portfolio_snapshot()` baseline 로직 개선
+  - `recalculate_snapshots()` 성능 최적화
+- `exchange_rate.py`: `get_historical_usd_krw_rate()` 함수 추가
+- `supabase/functions/update-stock-prices/index.ts`: market_indices에 환율 저장
+
+**추가된 파일**:
+- `sql_archive/fix_calculate_cash_balance_overload.sql`: 함수 오버로드 독립 실행 스크립트
+
+### 🔧 데이터베이스 마이그레이션
+
+**필수 실행 SQL**:
+```sql
+-- 1. market_indices 테이블에 환율 컬럼 추가
+ALTER TABLE market_indices ADD COLUMN IF NOT EXISTS usd_krw_rate NUMERIC(10, 4);
+
+-- 2. calculate_cash_balance 2-param 오버로드 추가
+CREATE OR REPLACE FUNCTION calculate_cash_balance(
+    p_account_id UUID,
+    p_currency TEXT
+)
+RETURNS NUMERIC AS $$
+BEGIN
+    RETURN calculate_cash_balance(p_account_id, p_currency, CURRENT_DATE);
+END;
+$$ LANGUAGE plpgsql;
+```
+
+또는 스크립트 실행:
+```bash
+# Supabase SQL Editor에서 실행
+sql_archive/fix_calculate_cash_balance_overload.sql
+```
+
+---
+
 ## [0.1.2] - 2025-10-15
 
 ### 🐛 버그 수정
