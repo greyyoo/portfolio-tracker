@@ -1370,11 +1370,14 @@ def show_statistics_page(supabase: Client):
                 for date, group in account_snapshots.groupby('snapshot_date'):
                     # exchange_rate 가져오기 (USD → KRW 변환용)
                     # 해당 날짜 그룹에서 첫 번째 exchange_rate 사용
-                    exchange_rate = 1300  # 기본값
+                    exchange_rate = get_usd_krw_rate()  # 실시간 환율을 기본값으로
                     if 'exchange_rate' in group.columns:
                         valid_rates = group['exchange_rate'].dropna()
                         if len(valid_rates) > 0:
                             exchange_rate = float(valid_rates.iloc[0])
+                        else:
+                            # 스냅샷에 환율 데이터가 없으면 실시간 환율 사용
+                            exchange_rate = get_usd_krw_rate()
 
                     # 원금 계산 (초기 시드 + 입금 - 출금, RP 이자 및 주식 투자 제외)
                     principal_krw = 0
