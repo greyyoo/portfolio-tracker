@@ -17,6 +17,7 @@ Supabase 콘솔에서 거래 데이터를 CSV로 일괄 입력하는 방법을 �
 | trade_price | NUMERIC | 거래 가격 | `150.25` |
 | currency | TEXT | 통화 (KRW 또는 USD) | `USD` |
 | quantity | INTEGER | 수량 | `10` |
+| fee | NUMERIC | 거래 수수료 (선택사항, 없으면 0 또는 빈칸) | `1.5` |
 
 ### 통화 규칙
 

@@ -1,5 +1,5 @@
-account_id,transaction_type,country,stock_name,ticker,transaction_date,trade_price,currency,quantity
-[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,USA,Apple Inc.,AAPL,2024-01-15,150.25,USD,10
-[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,USA,Microsoft Corp.,MSFT,2024-01-20,380.50,USD,5
-[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,KOR,Samsung Electronics,005930.KS,2024-02-01,72000,KRW,8
-[REPLACE_WITH_YOUR_ACCOUNT_UUID],SELL,USA,Apple Inc.,AAPL,2024-02-20,155.50,USD,3
+account_id,transaction_type,country,stock_name,ticker,transaction_date,trade_price,currency,quantity,fee
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,USA,Apple Inc.,AAPL,2024-01-15,150.25,USD,10,1.5
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,USA,Microsoft Corp.,MSFT,2024-01-20,380.50,USD,5,2.0
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],BUY,KOR,Samsung Electronics,005930.KS,2024-02-01,72000,KRW,8,0
+[REPLACE_WITH_YOUR_ACCOUNT_UUID],SELL,USA,Apple Inc.,AAPL,2024-02-20,155.50,USD,3,1.0

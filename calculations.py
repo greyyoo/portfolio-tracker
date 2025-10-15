@@ -63,11 +63,14 @@ def calculate_holdings(transactions_df: pd.DataFrame, account_id: Optional[str] 
         # 현재 보유 중인 주식만 포함
         if current_qty > 0:
             # 평균 단가 계산 (Average Cost Method)
-            total_buy_cost = (buy_txns['trade_price'] * buy_txns['quantity']).sum() if not buy_txns.empty else 0
-            total_sell_revenue = (sell_txns['trade_price'] * sell_txns['quantity']).sum() if not sell_txns.empty else 0
+            # 평단가는 매수 거래만으로 계산 (부분 매도 시에도 평단가는 변하지 않음)
+            # 수수료 포함: 총 매수 금액 = (거래가 × 수량) + 수수료
+            total_buy_cost = ((buy_txns['trade_price'] * buy_txns['quantity']) + buy_txns['fee'].fillna(0)).sum() if not buy_txns.empty else 0
 
-            # 평균 단가 = (총 매수 금액 - 총 매도 수익) / 현재 보유 수량
-            avg_price = (total_buy_cost - total_sell_revenue) / current_qty
+            # 평균 단가 = 총 매수 금액 / 총 매수 수량
+            avg_price = total_buy_cost / total_buy_qty if total_buy_qty > 0 else 0
+
+            # 현재 보유 주식의 취득원가 = 평단가 × 현재 보유 수량
             total_cost_basis = avg_price * current_qty
 
             holding_key = (acc_id, ticker) if not account_id else ticker
@@ -261,7 +264,14 @@ def calculate_aggregate_metrics(
 
 def calculate_closed_positions(transactions_df: pd.DataFrame, account_id: Optional[str] = None) -> pd.DataFrame:
     """
-    청산된 포지션 계산 (매수 수량 = 매도 수량, 계좌별 필터링 가능)
+    청산된 포지션 계산 (시간순 FIFO 매칭, 재매수 시나리오 지원)
+
+    로직:
+    1. 거래를 날짜순으로 정렬
+    2. 매수/매도를 순차적으로 매칭
+    3. 누적 수량이 0이 되는 시점 = 1개 청산 완료
+    4. 청산 후 새 매수 = 새로운 포지션 시작
+    5. 각 청산마다 별도 레코드 생성 (같은 티커의 여러 청산 지원)
 
     Args:
         transactions_df: 모든 거래 내역 DataFrame
@@ -269,7 +279,7 @@ def calculate_closed_positions(transactions_df: pd.DataFrame, account_id: Option
 
     Returns:
         청산된 포지션 DataFrame
-        - ticker (index)
+        - ticker: 티커
         - account_id: 계좌 ID (account_id 파라미터가 None일 때만)
         - stock_name: 주식명
         - country: 국가
@@ -277,6 +287,7 @@ def calculate_closed_positions(transactions_df: pd.DataFrame, account_id: Option
         - total_shares_traded: 총 거래 수량
         - realized_pl: 실현 손익
         - realized_return_pct: 실현 수익률 (%)
+        - result: Win/Loss 분류
         - first_trade_date: 첫 거래 날짜
         - last_trade_date: 마지막 거래 날짜
         - holding_period_days: 보유 기간 (일)
@@ -288,7 +299,7 @@ def calculate_closed_positions(transactions_df: pd.DataFrame, account_id: Option
     if account_id:
         transactions_df = transactions_df[transactions_df['account_id'] == account_id].copy()
 
-    closed_positions = {}
+    closed_positions_list = []
 
     # 계좌별, 티커별로 그룹화
     if account_id:
@@ -304,57 +315,181 @@ def calculate_closed_positions(transactions_df: pd.DataFrame, account_id: Option
             ticker = key if isinstance(key, str) else key[0]
             acc_id = account_id
 
-        # 매수/매도 거래 분리
-        buy_txns = group[group['transaction_type'] == 'BUY']
-        sell_txns = group[group['transaction_type'] == 'SELL']
+        # 날짜순 정렬
+        group['transaction_date'] = pd.to_datetime(group['transaction_date'])
+        sorted_txns = group.sort_values('transaction_date').reset_index(drop=True)
 
-        # 수량 계산
-        total_buy_qty = buy_txns['quantity'].sum() if not buy_txns.empty else 0
-        total_sell_qty = sell_txns['quantity'].sum() if not sell_txns.empty else 0
+        # 포지션 추적 변수
+        position_open = False
+        current_position = {
+            'buy_txns': [],
+            'sell_txns': [],
+            'first_date': None
+        }
+        running_qty = 0
 
-        # 청산된 포지션만 포함 (매수 수량 = 매도 수량)
-        if total_buy_qty > 0 and total_buy_qty == total_sell_qty:
-            # 실현 손익 계산
-            total_buy_cost = (buy_txns['trade_price'] * buy_txns['quantity']).sum()
-            total_sell_revenue = (sell_txns['trade_price'] * sell_txns['quantity']).sum()
-            realized_pl = total_sell_revenue - total_buy_cost
-            realized_return_pct = (realized_pl / total_buy_cost * 100) if total_buy_cost > 0 else 0
+        # 시간순으로 거래 처리
+        for idx, txn in sorted_txns.iterrows():
+            if txn['transaction_type'] == 'BUY':
+                if not position_open:
+                    # 새 포지션 시작
+                    position_open = True
+                    current_position['first_date'] = txn['transaction_date']
 
-            # 날짜 계산
-            group['transaction_date'] = pd.to_datetime(group['transaction_date'])
-            first_trade = group['transaction_date'].min()
-            last_trade = group['transaction_date'].max()
-            holding_period = (last_trade - first_trade).days
+                current_position['buy_txns'].append(txn)
+                running_qty += txn['quantity']
 
-            position_key = (acc_id, ticker) if not account_id else ticker
-            closed_positions[position_key] = {
-                'stock_name': group.iloc[0]['stock_name'],
-                'country': group.iloc[0]['country'],
-                'currency': group.iloc[0]['currency'],
-                'total_shares_traded': total_buy_qty,
-                'realized_pl': realized_pl,
-                'realized_return_pct': realized_return_pct,
-                'first_trade_date': first_trade.strftime('%Y-%m-%d'),
-                'last_trade_date': last_trade.strftime('%Y-%m-%d'),
-                'holding_period_days': holding_period
-            }
+            elif txn['transaction_type'] == 'SELL':
+                current_position['sell_txns'].append(txn)
+                running_qty -= txn['quantity']
 
-            if not account_id:
-                closed_positions[position_key]['account_id'] = acc_id
+                # 청산 완료 (수량 0)
+                if running_qty == 0 and position_open:
+                    # 청산 레코드 생성
+                    closed_record = _create_closed_record(
+                        current_position,
+                        txn['transaction_date'],
+                        ticker,
+                        acc_id,
+                        sorted_txns.iloc[0],
+                        account_id
+                    )
+                    closed_positions_list.append(closed_record)
 
-    if not closed_positions:
+                    # 포지션 초기화 (다음 매수를 위해)
+                    position_open = False
+                    current_position = {
+                        'buy_txns': [],
+                        'sell_txns': [],
+                        'first_date': None
+                    }
+
+    if not closed_positions_list:
         return pd.DataFrame()
 
-    closed_df = pd.DataFrame.from_dict(closed_positions, orient='index')
-
-    if account_id:
-        closed_df.index.name = 'ticker'
-    else:
-        closed_df.index.names = ['account_id', 'ticker']
-        closed_df = closed_df.reset_index()
-        closed_df = closed_df.set_index('ticker')
-
+    # DataFrame 생성
+    closed_df = pd.DataFrame(closed_positions_list)
     return closed_df
+
+
+def _create_closed_record(
+    position: Dict,
+    last_date: pd.Timestamp,
+    ticker: str,
+    acc_id: str,
+    metadata: pd.Series,
+    account_id_filter: Optional[str]
+) -> Dict:
+    """
+    청산 레코드 생성 헬퍼 함수
+
+    Args:
+        position: 현재 포지션 정보 (buy_txns, sell_txns, first_date)
+        last_date: 마지막 거래 날짜
+        ticker: 티커
+        acc_id: 계좌 ID
+        metadata: 메타데이터 (stock_name, currency 등)
+        account_id_filter: 계좌 필터 (None이면 account_id 컬럼 포함)
+
+    Returns:
+        청산 레코드 딕셔너리
+    """
+    # 매수 비용 및 매도 수익 계산 (수수료 포함)
+    # 수수료 포함 매수 비용 = (거래가 × 수량) + 수수료
+    buy_cost = sum((txn['trade_price'] * txn['quantity']) + txn.get('fee', 0) for txn in position['buy_txns'])
+    # 수수료 차감 매도 수익 = (거래가 × 수량) - 수수료
+    sell_revenue = sum((txn['trade_price'] * txn['quantity']) - txn.get('fee', 0) for txn in position['sell_txns'])
+    total_qty = sum(txn['quantity'] for txn in position['buy_txns'])
+
+    # 실현 손익 및 수익률 (수수료 반영됨)
+    realized_pl = sell_revenue - buy_cost
+    realized_return_pct = (realized_pl / buy_cost * 100) if buy_cost > 0 else 0
+
+    # 보유 기간
+    holding_days = (last_date - position['first_date']).days
+
+    # 레코드 생성
+    record = {
+        'ticker': ticker,
+        'stock_name': metadata['stock_name'],
+        'country': metadata['country'],
+        'currency': metadata['currency'],
+        'total_shares_traded': total_qty,
+        'realized_pl': realized_pl,
+        'realized_return_pct': realized_return_pct,
+        'result': 'Win' if realized_return_pct >= 0 else 'Loss',
+        'first_trade_date': position['first_date'].strftime('%Y-%m-%d'),
+        'last_trade_date': last_date.strftime('%Y-%m-%d'),
+        'holding_period_days': holding_days
+    }
+
+    # account_id 필터가 None일 때만 account_id 컬럼 추가
+    if account_id_filter is None:
+        record['account_id'] = acc_id
+
+    return record
+
+
+def calculate_win_rate(closed_positions_df: pd.DataFrame) -> Dict:
+    """
+    청산된 포지션의 승률 및 통계 계산
+
+    Args:
+        closed_positions_df: 청산된 포지션 DataFrame
+
+    Returns:
+        {
+            'total_trades': 전체 청산 수,
+            'wins': Win 개수,
+            'losses': Loss 개수,
+            'win_rate': 승률 (%),
+            'avg_win': 평균 수익률 (Win만, %),
+            'avg_loss': 평균 손실률 (Loss만, %),
+            'total_pl': 총 실현 손익,
+            'avg_pl': 평균 실현 손익
+        }
+    """
+    if closed_positions_df.empty:
+        return {
+            'total_trades': 0,
+            'wins': 0,
+            'losses': 0,
+            'win_rate': 0,
+            'avg_win': 0,
+            'avg_loss': 0,
+            'total_pl': 0,
+            'avg_pl': 0
+        }
+
+    # Win/Loss 분류
+    wins = closed_positions_df[closed_positions_df['realized_return_pct'] >= 0]
+    losses = closed_positions_df[closed_positions_df['realized_return_pct'] < 0]
+
+    total_trades = len(closed_positions_df)
+    win_count = len(wins)
+    loss_count = len(losses)
+
+    # 승률 계산
+    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+
+    # 평균 수익/손실률
+    avg_win = wins['realized_return_pct'].mean() if not wins.empty else 0
+    avg_loss = losses['realized_return_pct'].mean() if not losses.empty else 0
+
+    # 총 손익 및 평균 손익
+    total_pl = closed_positions_df['realized_pl'].sum()
+    avg_pl = closed_positions_df['realized_pl'].mean()
+
+    return {
+        'total_trades': total_trades,
+        'wins': win_count,
+        'losses': loss_count,
+        'win_rate': win_rate,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'total_pl': total_pl,
+        'avg_pl': avg_pl
+    }
 
 
 def add_current_prices_to_holdings(

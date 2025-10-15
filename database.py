@@ -326,22 +326,34 @@ def get_cash_transaction_summary(supabase: Client, account_id: str, currency: st
             'current_cash_balance': 현재 현금 잔고
         }
     """
-    response = supabase.rpc('get_cash_transaction_summary', {
-        'p_account_id': account_id,
-        'p_currency': currency
-    }).execute()
+    try:
+        response = supabase.rpc('get_cash_transaction_summary', {
+            'p_account_id': account_id,
+            'p_currency': currency
+        }).execute()
 
-    if response.data and len(response.data) > 0:
-        return response.data[0]
+        if response.data and len(response.data) > 0:
+            # float 타입으로 변환하여 타입 불일치 해결
+            result = response.data[0]
+            return {
+                'initial_seed': float(result.get('initial_seed', 0)),
+                'total_deposits': float(result.get('total_deposits', 0)),
+                'total_withdrawals': float(result.get('total_withdrawals', 0)),
+                'total_rp_interest': float(result.get('total_rp_interest', 0)),
+                'stock_invested': float(result.get('stock_invested', 0)),
+                'current_cash_balance': float(result.get('current_cash_balance', 0))
+            }
+    except Exception as e:
+        print(f"Error fetching cash transaction summary: {e}")
 
-    # 데이터가 없는 경우 기본값 반환
+    # 데이터가 없거나 오류 발생 시 기본값 반환
     return {
-        'initial_seed': 0,
-        'total_deposits': 0,
-        'total_withdrawals': 0,
-        'total_rp_interest': 0,
-        'stock_invested': 0,
-        'current_cash_balance': 0
+        'initial_seed': 0.0,
+        'total_deposits': 0.0,
+        'total_withdrawals': 0.0,
+        'total_rp_interest': 0.0,
+        'stock_invested': 0.0,
+        'current_cash_balance': 0.0
     }
 
 

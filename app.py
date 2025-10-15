@@ -23,13 +23,16 @@ from database import (
     get_price_cache_status,
     get_portfolio_history,
     get_aggregate_portfolio_history,
-    get_market_indices
+    get_market_indices,
+    get_cash_transactions,
+    get_cash_transaction_summary
 )
 from calculations import (
     calculate_holdings,
     calculate_portfolio_metrics,
     calculate_aggregate_metrics,
     calculate_closed_positions,
+    calculate_win_rate,
     add_current_prices_to_holdings,
     get_current_prices_from_cache
 )
@@ -45,6 +48,11 @@ from exchange_rate import (
 )
 from charts import (
     create_price_chart_with_transactions
+)
+from market_data import (
+    get_market_today,
+    get_fgi_badge_color,
+    get_change_color
 )
 
 # 페이지 설정
@@ -63,7 +71,7 @@ def get_supabase_client() -> Client:
 
 
 # 현재 가격 조회 (데이터베이스 캐시 사용)
-@st.cache_data(ttl=900)  # 15분 캐싱
+# TTL=0: 캐싱 비활성화 (DB 자체가 캐시 역할, Edge Function이 주기적으로 업데이트)
 def get_current_prices(tickers: list, _supabase: Client) -> dict:
     """
     여러 티커의 현재 가격 조회 (데이터베이스 캐시 사용)
@@ -132,12 +140,69 @@ def show_overview_page(supabase: Client):
     """Overview 페이지 - 전체 계좌 요약"""
     st.title("📊 전체 포트폴리오 Overview")
 
+    # Market Today 섹션
+    st.markdown("### 📈 Market Today")
+
+    market_data = get_market_today()
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    with col1:
+        sp500 = market_data['sp500']
+        if not sp500['error']:
+            change_color = get_change_color(sp500['change_pct'])
+            st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">S&P 500</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:28px; font-weight:600; margin-top:0; margin-bottom:0;">{sp500["price"]:,.2f}</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:16px; color:{change_color}; margin-top:0;">{sp500["change_pct"]:+.2f}%</p>', unsafe_allow_html=True)
+        else:
+            st.metric("S&P 500", "N/A", delta="0.00%")
+
+    with col2:
+        nasdaq = market_data['nasdaq']
+        if not nasdaq['error']:
+            change_color = get_change_color(nasdaq['change_pct'])
+            st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">NASDAQ 100</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:28px; font-weight:600; margin-top:0; margin-bottom:0;">{nasdaq["price"]:,.2f}</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:16px; color:{change_color}; margin-top:0;">{nasdaq["change_pct"]:+.2f}%</p>', unsafe_allow_html=True)
+        else:
+            st.metric("NASDAQ 100", "N/A", delta="0.00%")
+
+    with col3:
+        kospi = market_data['kospi']
+        if not kospi['error']:
+            change_color = get_change_color(kospi['change_pct'])
+            st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">KOSPI</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:28px; font-weight:600; margin-top:0; margin-bottom:0;">{kospi["price"]:,.2f}</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:16px; color:{change_color}; margin-top:0;">{kospi["change_pct"]:+.2f}%</p>', unsafe_allow_html=True)
+        else:
+            st.metric("KOSPI", "N/A", delta="0.00%")
+
+    with col4:
+        usdkrw = market_data['usdkrw']
+        if not usdkrw['error']:
+            change_color = get_change_color(usdkrw['change_pct'])
+            st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">USD/KRW</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:28px; font-weight:600; margin-top:0; margin-bottom:0;">{usdkrw["price"]:,.2f}</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:16px; color:{change_color}; margin-top:0;">{usdkrw["change_pct"]:+.2f}%</p>', unsafe_allow_html=True)
+        else:
+            st.metric("USD/KRW", "N/A", delta="0.00%")
+
+    with col5:
+        fgi = market_data['fgi']
+        if not fgi['error']:
+            badge_color = get_fgi_badge_color(fgi['classification'])
+            st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">Fear & Greed</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="font-size:28px; font-weight:600; margin-top:0; margin-bottom:4px;">{fgi["value"]}</p>', unsafe_allow_html=True)
+            st.markdown(f'<span style="background-color:{badge_color}; color:white; padding:4px 8px; border-radius:4px; font-size:11px; font-weight:600;">{fgi["classification"]}</span>', unsafe_allow_html=True)
+        else:
+            st.metric("Fear & Greed", "N/A")
+
+    st.caption(f"마지막 업데이트: {market_data['last_updated']}")
+    st.markdown("---")
+
     # 환율 조회
     exchange_rate_info = get_exchange_rate_info()
     exchange_rate = exchange_rate_info['rate']
-
-    # 환율 표시
-    st.info(f"💱 현재 환율: **{exchange_rate_info['formatted']}** (업데이트: {exchange_rate_info['timestamp']})")
 
     # 모든 계좌 조회
     accounts_df = get_all_accounts(supabase)
@@ -194,33 +259,33 @@ def show_overview_page(supabase: Client):
     # 전체 합산 지표 표시
     st.markdown("### 💰 전체 자산 요약")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
-        st.metric(
-            "총 자산 (KRW 기준)",
-            format_currency(aggregate['total_value_krw'], 'KRW')
-        )
+        st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">총 자산 (KRW)</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-size:36px; font-weight:600; margin-top:0;">{format_currency(aggregate["total_value_krw"], "KRW")}</p>', unsafe_allow_html=True)
 
     with col2:
-        st.metric(
-            "총 자산 (USD 기준)",
-            format_currency(aggregate['total_value_usd'], 'USD')
-        )
+        st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">총 자산 (USD)</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-size:36px; font-weight:600; margin-top:0;">{format_currency(aggregate["total_value_usd"], "USD")}</p>', unsafe_allow_html=True)
 
     with col3:
-        st.metric(
-            "총 손익 (KRW)",
-            format_currency(aggregate['total_pl_krw'], 'KRW'),
-            delta=f"{aggregate['total_return_pct']:.2f}%"
-        )
+        # 손익 색상 결정 (KRW)
+        pl_color_krw = "green" if aggregate['total_pl_krw'] > 0 else ("red" if aggregate['total_pl_krw'] < 0 else "gray")
+        st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">총 손익 (KRW)</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-size:36px; font-weight:600; color:{pl_color_krw}; margin-top:0;">{format_currency(aggregate["total_pl_krw"], "KRW")}</p>', unsafe_allow_html=True)
 
     with col4:
-        st.metric(
-            "총 손익 (USD)",
-            format_currency(aggregate['total_pl_usd'], 'USD'),
-            delta=f"{aggregate['total_return_pct']:.2f}%"
-        )
+        # 손익 색상 결정 (USD)
+        pl_color_usd = "green" if aggregate['total_pl_usd'] > 0 else ("red" if aggregate['total_pl_usd'] < 0 else "gray")
+        st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">총 손익 (USD)</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-size:36px; font-weight:600; color:{pl_color_usd}; margin-top:0;">{format_currency(aggregate["total_pl_usd"], "USD")}</p>', unsafe_allow_html=True)
+
+    with col5:
+        # 수익률 색상 결정
+        return_color = "green" if aggregate['total_return_pct'] > 0 else ("red" if aggregate['total_return_pct'] < 0 else "gray")
+        st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">총 수익률</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="font-size:36px; font-weight:600; color:{return_color}; margin-top:0;">{aggregate["total_return_pct"]:.2f}%</p>', unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -270,7 +335,10 @@ def show_overview_page(supabase: Client):
                     st.metric("투자금 (KRW)", format_currency(total_invested_krw, 'KRW'))
 
             with col4:
-                st.metric("수익률", f"{return_pct:.2f}%")
+                # 수익률 색상 결정
+                return_color = "green" if return_pct > 0 else ("red" if return_pct < 0 else "gray")
+                st.markdown('<p style="font-size:14px; color:gray; margin-bottom:0;">수익률</p>', unsafe_allow_html=True)
+                st.markdown(f'<p style="font-size:36px; font-weight:600; color:{return_color}; margin-top:0;">{return_pct:.2f}%</p>', unsafe_allow_html=True)
 
             with col5:
                 st.metric("종목", acc['holdings_count'])
@@ -537,7 +605,7 @@ def show_account_page(supabase: Client, account_number: int):
     st.markdown("---")
 
     # 탭 구성
-    tab1, tab2, tab3 = st.tabs(["📊 현재 보유", "📜 거래 내역", "✅ 청산 포지션"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 현재 보유", "📜 거래 내역", "💰 현금 내역", "✅ 청산 포지션"])
 
     # 탭 1: 현재 보유 주식
     with tab1:
@@ -770,7 +838,8 @@ def show_account_page(supabase: Client, account_number: int):
                 'stock_name': '주식명',
                 'ticker': '티커',
                 'trade_price': '거래 가격',
-                'quantity': '수량'
+                'quantity': '수량',
+                'fee': '수수료'
             }
 
             display_cols = [col for col in column_mapping.keys() if col in display_txns.columns]
@@ -781,14 +850,28 @@ def show_account_page(supabase: Client, account_number: int):
             if '유형' in display_txns.columns:
                 display_txns['유형'] = display_txns['유형'].map({'BUY': '매수', 'SELL': '매도'})
 
-            # 가격 포맷팅 (통화 정보 사용)
-            if currency_col is not None and '거래 가격' in display_txns.columns:
+            # 가격 및 수수료 포맷팅 (통화 정보 사용)
+            if currency_col is not None:
                 for idx in range(len(display_txns)):
                     currency = currency_col.iloc[idx]
-                    display_txns.iloc[idx, display_txns.columns.get_loc('거래 가격')] = format_currency(
-                        display_txns.iloc[idx, display_txns.columns.get_loc('거래 가격')],
-                        currency
-                    )
+
+                    # 거래 가격 포맷팅
+                    if '거래 가격' in display_txns.columns:
+                        display_txns.iloc[idx, display_txns.columns.get_loc('거래 가격')] = format_currency(
+                            display_txns.iloc[idx, display_txns.columns.get_loc('거래 가격')],
+                            currency
+                        )
+
+                    # 수수료 포맷팅 (0이면 '-' 표시)
+                    if '수수료' in display_txns.columns:
+                        fee_value = display_txns.iloc[idx, display_txns.columns.get_loc('수수료')]
+                        if pd.isna(fee_value) or fee_value == 0:
+                            display_txns.iloc[idx, display_txns.columns.get_loc('수수료')] = '-'
+                        else:
+                            display_txns.iloc[idx, display_txns.columns.get_loc('수수료')] = format_currency(
+                                fee_value,
+                                currency
+                            )
 
             # 주식명 컬럼 너비 설정
             column_config = {
@@ -807,8 +890,147 @@ def show_account_page(supabase: Client, account_number: int):
                 column_config=column_config
             )
 
-    # 탭 3: 청산 포지션
+    # 탭 3: 현금 내역
     with tab3:
+        st.subheader("💰 현금 거래 내역")
+
+        # 현금 거래 요약 정보 조회
+        cash_summary_krw = get_cash_transaction_summary(supabase, account_id, 'KRW') if 'KRW' in allowed_currencies else None
+        cash_summary_usd = get_cash_transaction_summary(supabase, account_id, 'USD') if 'USD' in allowed_currencies else None
+
+        # KRW 현금 내역
+        if cash_summary_krw:
+            st.markdown("#### 원화 (KRW)")
+
+            # 4-column 레이아웃
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric("총 입금액", format_currency(cash_summary_krw['total_deposits'], 'KRW'))
+
+            with col2:
+                st.metric("총 출금액", format_currency(cash_summary_krw['total_withdrawals'], 'KRW'))
+
+            with col3:
+                st.metric("RP 이자", format_currency(cash_summary_krw['total_rp_interest'], 'KRW'))
+
+            with col4:
+                st.metric("현재 잔고", format_currency(cash_summary_krw['current_cash_balance'], 'KRW'))
+
+        # USD 현금 내역
+        if cash_summary_usd:
+            st.markdown("#### 달러 (USD)")
+
+            # 4-column 레이아웃
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric("총 입금액", format_currency(cash_summary_usd['total_deposits'], 'USD'))
+
+            with col2:
+                st.metric("총 출금액", format_currency(cash_summary_usd['total_withdrawals'], 'USD'))
+
+            with col3:
+                st.metric("RP 이자", format_currency(cash_summary_usd['total_rp_interest'], 'USD'))
+
+            with col4:
+                st.metric("현재 잔고", format_currency(cash_summary_usd['current_cash_balance'], 'USD'))
+
+        st.markdown("---")
+
+        # 현금 거래 테이블
+        cash_txns = get_cash_transactions(supabase, account_id)
+
+        if not cash_txns.empty:
+            # 날짜순 내림차순 정렬 (최신 거래가 위로)
+            cash_txns = cash_txns.sort_values('transaction_date', ascending=False)
+
+            # 누적 잔고 계산 (오래된 것부터 계산하므로 오름차순 정렬)
+            cash_txns_sorted = cash_txns.sort_values('transaction_date', ascending=True).copy()
+
+            # 통화별로 누적 잔고 계산
+            cash_txns_sorted['cumulative_balance'] = 0.0
+
+            for currency in ['KRW', 'USD']:
+                currency_mask = cash_txns_sorted['currency'] == currency
+                currency_txns = cash_txns_sorted[currency_mask].copy()
+
+                if not currency_txns.empty:
+                    # 초기 시드 머니
+                    if currency == 'KRW':
+                        initial_seed = account_info['initial_seed_money_krw']
+                    else:
+                        initial_seed = account_info['initial_seed_money_usd']
+
+                    running_balance = initial_seed
+
+                    for idx in currency_txns.index:
+                        txn_type = cash_txns_sorted.loc[idx, 'transaction_type']
+                        amount = cash_txns_sorted.loc[idx, 'amount']
+
+                        if txn_type == 'DEPOSIT' or txn_type == 'RP_INTEREST':
+                            running_balance += amount
+                        elif txn_type == 'WITHDRAWAL':
+                            running_balance -= amount
+
+                        cash_txns_sorted.loc[idx, 'cumulative_balance'] = running_balance
+
+            # 다시 내림차순으로 정렬 (최신 거래가 위로)
+            display_cash = cash_txns_sorted.sort_values('transaction_date', ascending=False).copy()
+
+            # 표시용 DataFrame 생성
+            display_cash['유형'] = display_cash['transaction_type'].map({
+                'DEPOSIT': '입금',
+                'WITHDRAWAL': '출금',
+                'RP_INTEREST': 'RP 이자'
+            })
+
+            # 금액 포맷팅
+            display_cash['금액_formatted'] = display_cash.apply(
+                lambda row: format_currency(row['amount'], row['currency']),
+                axis=1
+            )
+
+            # 누적 잔고 포맷팅
+            display_cash['누적잔고_formatted'] = display_cash.apply(
+                lambda row: format_currency(row['cumulative_balance'], row['currency']),
+                axis=1
+            )
+
+            # 표시할 컬럼 선택
+            table_df = display_cash[['transaction_date', '유형', 'currency', '금액_formatted', '누적잔고_formatted', 'description']].copy()
+            table_df.columns = ['날짜', '유형', '통화', '금액', '누적 잔고', '설명']
+
+            # 설명이 없는 경우 '-' 표시
+            table_df['설명'] = table_df['설명'].fillna('-')
+
+            # 유형별 색상 스타일 적용 함수
+            def apply_cash_txn_color(row):
+                styles = [''] * len(row)
+
+                # 유형 컬럼 색상
+                if '유형' in table_df.columns:
+                    type_idx = table_df.columns.get_loc('유형')
+                    txn_type = row['유형']
+
+                    if txn_type == '입금':
+                        styles[type_idx] = 'color: blue; font-weight: bold'
+                    elif txn_type == '출금':
+                        styles[type_idx] = 'color: red; font-weight: bold'
+                    elif txn_type == 'RP 이자':
+                        styles[type_idx] = 'color: green; font-weight: bold'
+
+                return styles
+
+            # 스타일 적용
+            styled_cash = table_df.style.apply(apply_cash_txn_color, axis=1)
+
+            st.dataframe(styled_cash, use_container_width=True, hide_index=True, height=400)
+        else:
+            st.info("현금 거래 내역이 없습니다.")
+
+    # 탭 4: 청산 포지션
+    with tab4:
         st.subheader("청산된 포지션")
 
         closed_positions = calculate_closed_positions(account_txns, account_id)
@@ -816,15 +1038,58 @@ def show_account_page(supabase: Client, account_number: int):
         if closed_positions.empty:
             st.info("청산된 포지션이 없습니다.")
         else:
-            display_closed = closed_positions.reset_index()
+            # 승률 통계 계산
+            win_stats = calculate_win_rate(closed_positions)
+
+            # 승률 통계 표시 (4-column 레이아웃)
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric("전체 청산", f"{win_stats['total_trades']}건")
+
+            with col2:
+                st.metric(
+                    "Win",
+                    f"{win_stats['wins']}건",
+                    delta=f"평균 {win_stats['avg_win']:.2f}%",
+                    delta_color="normal"
+                )
+
+            with col3:
+                st.metric(
+                    "Loss",
+                    f"{win_stats['losses']}건",
+                    delta=f"평균 {win_stats['avg_loss']:.2f}%",
+                    delta_color="inverse"
+                )
+
+            with col4:
+                # 승률 HTML 마크다운 (50% 이상 초록, 미만 빨강)
+                wr_color = "green" if win_stats['win_rate'] >= 50 else "red"
+                st.markdown(
+                    f'<p style="font-size:14px; color:gray; margin-bottom:0;">승률 (WR)</p>',
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f'<p style="font-size:36px; font-weight:600; color:{wr_color}; margin-top:0;">{win_stats["win_rate"]:.2f}%</p>',
+                    unsafe_allow_html=True
+                )
+
+            st.markdown("---")
+
+            # 청산 포지션 테이블
+            display_closed = closed_positions.copy()
 
             # 통화 정보를 currency 컬럼에서 가져와서 임시 저장 (포맷팅용)
             currency_col = display_closed['currency'].copy() if 'currency' in display_closed.columns else None
+            # result 컬럼도 임시 저장 (색상 코딩용)
+            result_col = display_closed['result'].copy() if 'result' in display_closed.columns else None
 
-            # 컬럼 매핑 (국가, 통화 제외)
+            # 컬럼 매핑
             column_mapping = {
                 'ticker': '티커',
                 'stock_name': '주식명',
+                'result': '결과',
                 'total_shares_traded': '거래 수량',
                 'realized_pl': '실현 손익',
                 'realized_return_pct': '수익률 (%)',
@@ -836,7 +1101,7 @@ def show_account_page(supabase: Client, account_number: int):
             display_closed = display_closed[[col for col in column_mapping.keys() if col in display_closed.columns]].copy()
             display_closed.columns = [column_mapping[col] for col in display_closed.columns]
 
-            # 손익 및 수익률 포맷팅 (통화 정보 사용)
+            # 손익 포맷팅 (통화 정보 사용)
             if currency_col is not None and '실현 손익' in display_closed.columns:
                 for idx in range(len(display_closed)):
                     currency = currency_col.iloc[idx]
@@ -845,11 +1110,12 @@ def show_account_page(supabase: Client, account_number: int):
                         currency
                     )
 
+            # 수익률 포맷팅
             if '수익률 (%)' in display_closed.columns:
                 for idx in range(len(display_closed)):
                     display_closed.iloc[idx, display_closed.columns.get_loc('수익률 (%)')] = f"{display_closed.iloc[idx, display_closed.columns.get_loc('수익률 (%)')]:.2f}"
 
-            # 청산 포지션도 높이 제한 없이 전체 표시 (height 파라미터 생략)
+            # 청산 포지션 테이블 표시
             st.dataframe(display_closed, use_container_width=True, hide_index=True)
 
 
@@ -1069,6 +1335,201 @@ def show_statistics_page(supabase: Client):
             """)
     else:
         st.info("정규화할 데이터가 부족합니다. 2025-10-13의 기준 데이터가 필요합니다.")
+
+    # ========== 원금 vs 계좌평가액 차트 ==========
+    st.markdown("---")
+    st.markdown("### 💰 원금 vs 계좌평가액")
+    st.caption("계좌별 원금(입출금만 반영)과 계좌평가액(주식+현금)의 시계열 추이")
+    st.info("ℹ️ USD 계좌는 일일 환율 변동을 반영하여 원화로 표시하므로 원금에 변동이 있는 것으로 보일 수 있습니다.")
+
+    if not portfolio_snapshots.empty and not accounts_df.empty:
+        # 계좌별 차트 생성
+        account_charts_data = []
+
+        for _, acc in accounts_df.iterrows():
+            account_id = acc['id']
+            account_number = acc['account_number']
+            account_name = f"계좌 {account_number}"
+
+            # 해당 계좌의 스냅샷 데이터
+            account_snapshots = portfolio_snapshots[portfolio_snapshots['account_id'] == account_id].copy()
+
+            if not account_snapshots.empty:
+                # cash_transactions 미리 조회 (한 번만)
+                cash_txns_account = get_cash_transactions(supabase, account_id)
+                if not cash_txns_account.empty:
+                    cash_txns_account['transaction_date'] = pd.to_datetime(cash_txns_account['transaction_date'])
+
+                # 초기 시드 머니
+                initial_seed_krw = acc['initial_seed_money_krw']
+                initial_seed_usd = acc['initial_seed_money_usd']
+
+                # 날짜별로 KRW + USD 합산
+                account_by_date = {}
+
+                for date, group in account_snapshots.groupby('snapshot_date'):
+                    # exchange_rate 가져오기 (USD → KRW 변환용)
+                    # 해당 날짜 그룹에서 첫 번째 exchange_rate 사용
+                    exchange_rate = 1300  # 기본값
+                    if 'exchange_rate' in group.columns:
+                        valid_rates = group['exchange_rate'].dropna()
+                        if len(valid_rates) > 0:
+                            exchange_rate = float(valid_rates.iloc[0])
+
+                    # 원금 계산 (초기 시드 + 입금 - 출금, RP 이자 및 주식 투자 제외)
+                    principal_krw = 0
+                    principal_usd = 0
+
+                    if not cash_txns_account.empty:
+                        # 해당 날짜까지의 거래만 필터링
+                        cash_until_date = cash_txns_account[cash_txns_account['transaction_date'] <= date]
+
+                        # KRW 원금 계산
+                        krw_txns = cash_until_date[cash_until_date['currency'] == 'KRW']
+                        deposits_krw = krw_txns[krw_txns['transaction_type'] == 'DEPOSIT']['amount'].sum() if not krw_txns.empty else 0
+                        withdrawals_krw = krw_txns[krw_txns['transaction_type'] == 'WITHDRAWAL']['amount'].sum() if not krw_txns.empty else 0
+                        principal_krw = initial_seed_krw + deposits_krw - withdrawals_krw
+
+                        # USD 원금 계산
+                        usd_txns = cash_until_date[cash_until_date['currency'] == 'USD']
+                        deposits_usd = usd_txns[usd_txns['transaction_type'] == 'DEPOSIT']['amount'].sum() if not usd_txns.empty else 0
+                        withdrawals_usd = usd_txns[usd_txns['transaction_type'] == 'WITHDRAWAL']['amount'].sum() if not usd_txns.empty else 0
+                        principal_usd = initial_seed_usd + deposits_usd - withdrawals_usd
+                    else:
+                        # cash_transactions가 없으면 초기 시드만
+                        principal_krw = initial_seed_krw
+                        principal_usd = initial_seed_usd
+
+                    # KRW로 통합 (USD → KRW 변환)
+                    principal = principal_krw + (principal_usd * exchange_rate)
+
+                    # 계좌 평가액 계산 (통화별 합산 후 KRW로 변환)
+                    total_value_krw = 0
+
+                    for _, row in group.iterrows():
+                        currency = row['currency']
+                        total_val = row['total_value']
+
+                        if currency == 'KRW':
+                            total_value_krw += total_val
+                        else:  # USD
+                            total_value_krw += total_val * exchange_rate
+
+                    account_by_date[date] = {
+                        'total_value': total_value_krw,  # 계좌 평가액 (주식 + 현금, KRW 변환)
+                        'principal': principal            # 원금 (초기 시드 + 입금 - 출금, KRW 변환)
+                    }
+
+                account_charts_data.append({
+                    'account_name': account_name,
+                    'account_number': account_number,
+                    'data': account_by_date
+                })
+
+        # 계좌별 차트 표시 (2-column 레이아웃)
+        if account_charts_data:
+            for i in range(0, len(account_charts_data), 2):
+                cols = st.columns(2)
+
+                for col_idx, chart_data in enumerate(account_charts_data[i:i+2]):
+                    with cols[col_idx]:
+                        # 데이터 준비
+                        dates = sorted(chart_data['data'].keys())
+                        total_values = [chart_data['data'][d]['total_value'] for d in dates]
+                        principals = [chart_data['data'][d]['principal'] for d in dates]
+
+                        # DataFrame 생성
+                        chart_df = pd.DataFrame({
+                            'Date': dates * 2,
+                            'Type': ['계좌평가액'] * len(dates) + ['원금'] * len(dates),
+                            'Value': total_values + principals
+                        })
+
+                        # Plotly 차트
+                        fig_account = px.line(
+                            chart_df,
+                            x='Date',
+                            y='Value',
+                            color='Type',
+                            title=chart_data['account_name'],
+                            labels={'Date': '날짜', 'Value': '금액 (KRW)', 'Type': '구분'},
+                            color_discrete_map={'계좌평가액': '#2e7d32', '원금': '#1976d2'}
+                        )
+
+                        fig_account.update_layout(
+                            hovermode='x unified',
+                            legend=dict(
+                                orientation='h',
+                                yanchor='bottom',
+                                y=1.02,
+                                xanchor='right',
+                                x=1
+                            ),
+                            height=400
+                        )
+
+                        fig_account.update_xaxes(tickformat="%Y-%m-%d")
+                        fig_account.update_yaxes(tickformat=",.0f")
+
+                        st.plotly_chart(fig_account, use_container_width=True)
+
+            # 전체 포트폴리오 차트 (full-width)
+            st.markdown("#### 전체 포트폴리오")
+
+            # 전체 데이터 합산
+            total_by_date = {}
+
+            for chart_data in account_charts_data:
+                for date, values in chart_data['data'].items():
+                    if date not in total_by_date:
+                        total_by_date[date] = {'total_value': 0, 'principal': 0}
+
+                    total_by_date[date]['total_value'] += values['total_value']
+                    total_by_date[date]['principal'] += values['principal']
+
+            # 데이터 준비
+            dates = sorted(total_by_date.keys())
+            total_values = [total_by_date[d]['total_value'] for d in dates]
+            principals = [total_by_date[d]['principal'] for d in dates]
+
+            # DataFrame 생성
+            total_chart_df = pd.DataFrame({
+                'Date': dates * 2,
+                'Type': ['계좌평가액'] * len(dates) + ['원금'] * len(dates),
+                'Value': total_values + principals
+            })
+
+            # Plotly 차트
+            fig_total = px.line(
+                total_chart_df,
+                x='Date',
+                y='Value',
+                color='Type',
+                title='전체 포트폴리오',
+                labels={'Date': '날짜', 'Value': '금액 (KRW)', 'Type': '구분'},
+                color_discrete_map={'계좌평가액': '#2e7d32', '원금': '#1976d2'}
+            )
+
+            fig_total.update_layout(
+                hovermode='x unified',
+                legend=dict(
+                    orientation='h',
+                    yanchor='bottom',
+                    y=1.02,
+                    xanchor='right',
+                    x=1
+                ),
+                height=500
+            )
+
+            fig_total.update_xaxes(tickformat="%Y-%m-%d")
+            fig_total.update_yaxes(tickformat=",.0f")
+
+            st.plotly_chart(fig_total, use_container_width=True)
+        else:
+            st.info("차트를 표시할 데이터가 없습니다.")
+    else:
+        st.info("포트폴리오 스냅샷 데이터가 없습니다.")
 
 
 def main():

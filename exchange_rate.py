@@ -4,9 +4,10 @@ Exchange Rate Module - Real-time USD/KRW exchange rate fetching
 import yfinance as yf
 import streamlit as st
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
-@st.cache_data(ttl=900)  # 15분 캐싱
+@st.cache_data(ttl=60)  # 1분 캐싱
 def get_usd_krw_rate() -> float:
     """
     실시간 USD/KRW 환율 조회 (yfinance 사용)
@@ -118,13 +119,16 @@ def get_exchange_rate_info() -> dict:
         {
             'rate': 환율,
             'formatted': 포맷팅된 환율 문자열,
-            'timestamp': 조회 시각
+            'timestamp': 조회 시각 (KST)
         }
     """
     rate = get_usd_krw_rate()
 
+    # KST 시간으로 변환
+    kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
+
     return {
         'rate': rate,
         'formatted': format_exchange_rate(rate),
-        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        'timestamp': kst_now.strftime("%Y-%m-%d %H:%M:%S KST")
     }

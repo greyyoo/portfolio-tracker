@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     currency TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
     trade_price NUMERIC(15, 2) NOT NULL CHECK (trade_price > 0),
     quantity INTEGER NOT NULL CHECK (quantity > 0),
+    fee NUMERIC(15, 2) DEFAULT 0 CHECK (fee >= 0),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -71,21 +72,25 @@ CREATE TRIGGER enforce_currency_restriction
     EXECUTE FUNCTION check_currency_restriction();
 
 -- ============================================
--- 3. PRICE CACHE TABLE
+-- 3. STOCK PRICES TABLE (Price Cache)
 -- ============================================
-CREATE TABLE IF NOT EXISTS price_cache (
+CREATE TABLE IF NOT EXISTS stock_prices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ticker TEXT NOT NULL UNIQUE,
     current_price NUMERIC(15, 2) NOT NULL,
     currency TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
+    is_active BOOLEAN DEFAULT true,
+    fetch_error TEXT,
+    retry_count INTEGER DEFAULT 0,
     last_updated TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_price_cache_ticker ON price_cache(ticker);
-CREATE INDEX IF NOT EXISTS idx_price_cache_updated ON price_cache(last_updated);
+CREATE INDEX IF NOT EXISTS idx_stock_prices_ticker ON stock_prices(ticker);
+CREATE INDEX IF NOT EXISTS idx_stock_prices_active ON stock_prices(is_active);
+CREATE INDEX IF NOT EXISTS idx_stock_prices_updated ON stock_prices(last_updated);
 
-COMMENT ON TABLE price_cache IS 'Cached stock prices updated by Edge Function';
+COMMENT ON TABLE stock_prices IS 'Cached stock prices updated by Edge Function';
 
 -- ============================================
 -- 4. PORTFOLIO SNAPSHOTS TABLE
@@ -325,6 +330,212 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Recalculate snapshots for a date range
+CREATE OR REPLACE FUNCTION recalculate_snapshots(
+    p_start_date DATE,
+    p_end_date DATE DEFAULT CURRENT_DATE,
+    p_account_id UUID DEFAULT NULL
+)
+RETURNS TABLE (
+    recalculated_date DATE,
+    result_account_id UUID,
+    result_currency TEXT,
+    result_snapshot_id UUID
+) AS $$
+DECLARE
+    v_account RECORD;
+    v_date DATE;
+    v_stock_value NUMERIC;
+    v_cash_balance NUMERIC;
+    v_exchange_rate NUMERIC;
+    v_snapshot_id UUID;
+BEGIN
+    -- Validate date range
+    IF p_start_date > p_end_date THEN
+        RAISE EXCEPTION 'Start date must be before or equal to end date';
+    END IF;
+
+    -- Get exchange rate (use latest available or 1300 as fallback)
+    SELECT COALESCE(
+        (SELECT current_price FROM stock_prices WHERE ticker = 'KRW=X' AND is_active = true LIMIT 1),
+        1300
+    ) INTO v_exchange_rate;
+
+    -- Loop through each account (or specific account if provided)
+    FOR v_account IN
+        SELECT a.id, a.initial_seed_money_krw, a.initial_seed_money_usd, a.allowed_currencies
+        FROM accounts a
+        WHERE (p_account_id IS NULL OR a.id = p_account_id)
+          AND a.is_active = true
+    LOOP
+        -- Loop through each date in range
+        v_date := p_start_date;
+        WHILE v_date <= p_end_date LOOP
+            -- Process each currency for this account
+            IF 'KRW' = ANY(v_account.allowed_currencies) THEN
+                -- Calculate KRW stock value at this date
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN net_qty > 0 THEN net_qty * COALESCE(pc.current_price, 0)
+                        ELSE 0
+                    END
+                ), 0)
+                INTO v_stock_value
+                FROM (
+                    SELECT
+                        t.ticker,
+                        SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE -t.quantity END) as net_qty
+                    FROM transactions t
+                    WHERE t.account_id = v_account.id
+                      AND t.currency = 'KRW'
+                      AND t.transaction_date <= v_date
+                    GROUP BY t.ticker
+                ) holdings
+                LEFT JOIN stock_prices pc ON holdings.ticker = pc.ticker;
+
+                -- Calculate KRW cash balance at this date
+                v_cash_balance := v_account.initial_seed_money_krw
+                    + COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'KRW'
+                          AND ct.transaction_type = 'DEPOSIT'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    + COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'KRW'
+                          AND ct.transaction_type = 'RP_INTEREST'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    - COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'KRW'
+                          AND ct.transaction_type = 'WITHDRAWAL'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    - COALESCE((
+                        SELECT SUM((t.trade_price * t.quantity) + COALESCE(t.fee, 0))
+                        FROM transactions t
+                        WHERE t.account_id = v_account.id
+                          AND t.currency = 'KRW'
+                          AND t.transaction_type = 'BUY'
+                          AND t.transaction_date <= v_date
+                    ), 0)
+                    + COALESCE((
+                        SELECT SUM((t.trade_price * t.quantity) - COALESCE(t.fee, 0))
+                        FROM transactions t
+                        WHERE t.account_id = v_account.id
+                          AND t.currency = 'KRW'
+                          AND t.transaction_type = 'SELL'
+                          AND t.transaction_date <= v_date
+                    ), 0);
+
+                -- Capture KRW snapshot
+                SELECT capture_portfolio_snapshot(
+                    v_account.id,
+                    v_date,
+                    'KRW',
+                    v_stock_value,
+                    v_cash_balance,
+                    v_exchange_rate
+                ) INTO v_snapshot_id;
+
+                RETURN QUERY SELECT v_date AS recalculated_date, v_account.id AS result_account_id, 'KRW'::TEXT AS result_currency, v_snapshot_id AS result_snapshot_id;
+            END IF;
+
+            IF 'USD' = ANY(v_account.allowed_currencies) THEN
+                -- Calculate USD stock value at this date
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN net_qty > 0 THEN net_qty * COALESCE(pc.current_price, 0)
+                        ELSE 0
+                    END
+                ), 0)
+                INTO v_stock_value
+                FROM (
+                    SELECT
+                        t.ticker,
+                        SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE -t.quantity END) as net_qty
+                    FROM transactions t
+                    WHERE t.account_id = v_account.id
+                      AND t.currency = 'USD'
+                      AND t.transaction_date <= v_date
+                    GROUP BY t.ticker
+                ) holdings
+                LEFT JOIN stock_prices pc ON holdings.ticker = pc.ticker;
+
+                -- Calculate USD cash balance at this date
+                v_cash_balance := v_account.initial_seed_money_usd
+                    + COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'USD'
+                          AND ct.transaction_type = 'DEPOSIT'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    + COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'USD'
+                          AND ct.transaction_type = 'RP_INTEREST'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    - COALESCE((
+                        SELECT SUM(ct.amount)
+                        FROM cash_transactions ct
+                        WHERE ct.account_id = v_account.id
+                          AND ct.currency = 'USD'
+                          AND ct.transaction_type = 'WITHDRAWAL'
+                          AND ct.transaction_date <= v_date
+                    ), 0)
+                    - COALESCE((
+                        SELECT SUM((t.trade_price * t.quantity) + COALESCE(t.fee, 0))
+                        FROM transactions t
+                        WHERE t.account_id = v_account.id
+                          AND t.currency = 'USD'
+                          AND t.transaction_type = 'BUY'
+                          AND t.transaction_date <= v_date
+                    ), 0)
+                    + COALESCE((
+                        SELECT SUM((t.trade_price * t.quantity) - COALESCE(t.fee, 0))
+                        FROM transactions t
+                        WHERE t.account_id = v_account.id
+                          AND t.currency = 'USD'
+                          AND t.transaction_type = 'SELL'
+                          AND t.transaction_date <= v_date
+                    ), 0);
+
+                -- Capture USD snapshot
+                SELECT capture_portfolio_snapshot(
+                    v_account.id,
+                    v_date,
+                    'USD',
+                    v_stock_value,
+                    v_cash_balance,
+                    v_exchange_rate
+                ) INTO v_snapshot_id;
+
+                RETURN QUERY SELECT v_date AS recalculated_date, v_account.id AS result_account_id, 'USD'::TEXT AS result_currency, v_snapshot_id AS result_snapshot_id;
+            END IF;
+
+            v_date := v_date + INTERVAL '1 day';
+        END LOOP;
+    END LOOP;
+
+    RETURN;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION recalculate_snapshots IS 'Recalculate portfolio snapshots for a date range. Useful when updating historical transactions or cash flows.';
+
 -- ============================================
 -- 7. ROW LEVEL SECURITY (RLS) POLICIES
 -- ============================================
@@ -332,9 +543,10 @@ $$ LANGUAGE plpgsql;
 -- Enable RLS on all tables
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE price_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE market_indices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cash_transactions ENABLE ROW LEVEL SECURITY;
 
 -- Public read-only access policies
 CREATE POLICY "Allow public read access to accounts"
@@ -347,8 +559,13 @@ CREATE POLICY "Allow public read access to transactions"
     TO public
     USING (true);
 
-CREATE POLICY "Allow public read access to price_cache"
-    ON price_cache FOR SELECT
+CREATE POLICY "Allow public read access to stock_prices"
+    ON stock_prices FOR SELECT
+    TO public
+    USING (true);
+
+CREATE POLICY "Allow public read access to cash_transactions"
+    ON cash_transactions FOR SELECT
     TO public
     USING (true);
 
@@ -396,7 +613,7 @@ SELECT 'Accounts' as table_name, COUNT(*) as count FROM accounts
 UNION ALL
 SELECT 'Transactions', COUNT(*) FROM transactions
 UNION ALL
-SELECT 'Price Cache', COUNT(*) FROM price_cache
+SELECT 'Stock Prices Cache', COUNT(*) FROM stock_prices
 UNION ALL
 SELECT 'Portfolio Snapshots', COUNT(*) FROM portfolio_snapshots
 UNION ALL

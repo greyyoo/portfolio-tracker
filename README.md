@@ -32,7 +32,7 @@ Streamlit 기반의 대시보드로 5개의 독립된 투자 계좌를 관리하
 - CSV 일괄 입력 지원
 
 ### 📊 포트폴리오 분석
-- **자동 가격 업데이트** (Supabase Edge Function, 매일 06:00 KST)
+- **자동 가격 업데이트** (Supabase Edge Function, 매시간 정각 실행)
 - 실시간 USD/KRW 환율 적용 (Yahoo Finance API)
 - 통화별 포트폴리오 성과 분석 (KRW/USD 분리)
 - 평균 단가 및 수익률 자동 계산
@@ -144,26 +144,23 @@ trading-portfolio-tracker/
 ├── 💱 exchange_rate.py                # USD/KRW 환율
 ├── 💰 currency_utils.py               # 통화 포맷팅
 ├── 📊 charts.py                       # 차트 생성
+├── 📈 market_data.py                  # 실시간 시장 지수 및 Fear & Greed Index
 ├── 📦 requirements.txt                # Python 의존성
 ├── 🔐 .env.example                    # 환경 변수 템플릿
 ├── 🚫 .gitignore                      # Git 제외 파일
 │
 ├── 🗃️ complete_schema.sql             # 통합 데이터베이스 스키마
 ├── 📚 SECURITY.md                     # 보안 가이드
-├── 📖 CLAUDE.md                       # 개발자 가이드 (Claude Code용)
 │
 ├── 📂 csv_import_templates/           # CSV 템플릿
 │   ├── transactions_template.csv
 │   ├── cash_transactions_template.csv
 │   └── README.md
 │
-├── 📂 supabase/
-│   └── functions/
-│       └── update-stock-prices/
-│           └── index.ts               # 가격 업데이트 Edge Function
-│
-├── 📂 sql_archive/                    # 아카이브 SQL 파일
-└── 📂 docs_archive/                   # 아카이브 문서
+└── 📂 supabase/
+    └── functions/
+        └── update-stock-prices/
+            └── index.ts               # 가격 업데이트 Edge Function
 ```
 
 ---
@@ -260,10 +257,10 @@ Supabase Dashboard → **Database** → **Extensions** → **pg_cron** 활성화
 SQL Editor에서 실행:
 
 ```sql
--- 매일 21:00 UTC (한국 시간 06:00 다음날) 실행
+-- 매시간 정각 실행 (거래 시간 중 실시간 업데이트)
 SELECT cron.schedule(
-  'daily-stock-price-update',
-  '0 21 * * 1-5',  -- 월-금 (주말 제외)
+  'hourly-stock-price-update',
+  '0 * * * *',  -- 매시간 정각
   $$
   SELECT net.http_post(
     url := 'https://[YOUR_PROJECT_REF].supabase.co/functions/v1/update-stock-prices',
@@ -438,4 +435,4 @@ A: 수동으로 Edge Function을 실행해보세요:
 
 **Built with ❤️ using Streamlit and Supabase**
 
-**최종 업데이트**: 2025-10-14 | **버전**: 2.0
+**최종 업데이트**: 2025-10-15 | **버전**: 0.1.2

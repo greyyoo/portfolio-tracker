@@ -28,6 +28,9 @@ supabase/.temp/
 supabase/.branches/
 .supabase/
 
+# Telegram Edge Function (private - contains message parsing logic)
+supabase/functions/telegram-transaction-handler/
+
 # ============================================
 # IDE & Editors
 # ============================================
