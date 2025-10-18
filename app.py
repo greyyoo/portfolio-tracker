@@ -909,8 +909,8 @@ def show_account_page(supabase: Client, account_number: int):
         if cash_summary_krw:
             st.markdown("#### 원화 (KRW)")
 
-            # 4-column 레이아웃
-            col1, col2, col3, col4 = st.columns(4)
+            # 6-column 레이아웃
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
 
             with col1:
                 st.metric("총 입금액", format_currency(cash_summary_krw['total_deposits'], 'KRW'))
@@ -922,14 +922,20 @@ def show_account_page(supabase: Client, account_number: int):
                 st.metric("RP 이자", format_currency(cash_summary_krw['total_rp_interest'], 'KRW'))
 
             with col4:
+                st.metric("조정(+)", format_currency(cash_summary_krw['total_adjustments_increase'], 'KRW'))
+
+            with col5:
+                st.metric("조정(-)", format_currency(cash_summary_krw['total_adjustments_decrease'], 'KRW'))
+
+            with col6:
                 st.metric("현재 잔고", format_currency(cash_summary_krw['current_cash_balance'], 'KRW'))
 
         # USD 현금 내역
         if cash_summary_usd:
             st.markdown("#### 달러 (USD)")
 
-            # 4-column 레이아웃
-            col1, col2, col3, col4 = st.columns(4)
+            # 6-column 레이아웃
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
 
             with col1:
                 st.metric("총 입금액", format_currency(cash_summary_usd['total_deposits'], 'USD'))
@@ -941,6 +947,12 @@ def show_account_page(supabase: Client, account_number: int):
                 st.metric("RP 이자", format_currency(cash_summary_usd['total_rp_interest'], 'USD'))
 
             with col4:
+                st.metric("조정(+)", format_currency(cash_summary_usd['total_adjustments_increase'], 'USD'))
+
+            with col5:
+                st.metric("조정(-)", format_currency(cash_summary_usd['total_adjustments_decrease'], 'USD'))
+
+            with col6:
                 st.metric("현재 잔고", format_currency(cash_summary_usd['current_cash_balance'], 'USD'))
 
         st.markdown("---")
@@ -975,9 +987,9 @@ def show_account_page(supabase: Client, account_number: int):
                         txn_type = cash_txns_sorted.loc[idx, 'transaction_type']
                         amount = cash_txns_sorted.loc[idx, 'amount']
 
-                        if txn_type == 'DEPOSIT' or txn_type == 'RP_INTEREST':
+                        if txn_type in ('DEPOSIT', 'RP_INTEREST', 'ADJUSTMENT_INCREASE'):
                             running_balance += amount
-                        elif txn_type == 'WITHDRAWAL':
+                        elif txn_type in ('WITHDRAWAL', 'ADJUSTMENT_DECREASE'):
                             running_balance -= amount
 
                         cash_txns_sorted.loc[idx, 'cumulative_balance'] = running_balance
@@ -989,7 +1001,9 @@ def show_account_page(supabase: Client, account_number: int):
             display_cash['유형'] = display_cash['transaction_type'].map({
                 'DEPOSIT': '입금',
                 'WITHDRAWAL': '출금',
-                'RP_INTEREST': 'RP 이자'
+                'RP_INTEREST': 'RP 이자',
+                'ADJUSTMENT_INCREASE': '조정(+)',
+                'ADJUSTMENT_DECREASE': '조정(-)'
             })
 
             # 금액 포맷팅
@@ -1026,6 +1040,10 @@ def show_account_page(supabase: Client, account_number: int):
                         styles[type_idx] = 'color: red; font-weight: bold'
                     elif txn_type == 'RP 이자':
                         styles[type_idx] = 'color: green; font-weight: bold'
+                    elif txn_type == '조정(+)':
+                        styles[type_idx] = 'color: orange; font-weight: bold'
+                    elif txn_type == '조정(-)':
+                        styles[type_idx] = 'color: darkorange; font-weight: bold'
 
                 return styles
 

@@ -254,7 +254,7 @@ async function capturePortfolioSnapshots(
   supabase: any,
   exchangeRate: number,
   marketIndices: MarketIndices
-): Promise<{ captured: number; errors: number }> {
+): Promise<{ captured: number; errors: number; indicesStored: boolean }> {
   const accounts = await getAllAccounts(supabase);
   let captured = 0;
   let errors = 0;
@@ -266,9 +266,18 @@ async function capturePortfolioSnapshots(
   // KST is UTC+9
   const kstDate = new Date(now.getTime() + (9 * 60 * 60 * 1000)).toISOString().split("T")[0];
 
+  // Check if today is weekend (Saturday = 6, Sunday = 0)
+  const dayOfWeek = now.getUTCDay();
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
   // Store market indices once (use UTC date for US indices consistency)
-  try {
-    const { error: indicesError } = await supabase.rpc("upsert_market_indices", {
+  // Skip on weekends as markets are closed
+  let indicesStored = false;
+  if (isWeekend) {
+    console.log(`⏭️  Skipping market indices storage (weekend: day ${dayOfWeek})`);
+  } else {
+    try {
+    const { data: storedDate, error: indicesError } = await supabase.rpc("upsert_market_indices", {
       p_snapshot_date: utcDate,
       p_spx_close: marketIndices.spx,
       p_ndx_close: marketIndices.ndx,
@@ -279,10 +288,13 @@ async function capturePortfolioSnapshots(
     if (indicesError) {
       console.error("Error storing market indices:", indicesError);
     } else {
-      console.log(`Market indices stored for ${utcDate} (including exchange rate: ${exchangeRate})`);
+      indicesStored = true;
+      console.log(`✓ Market indices stored successfully for ${storedDate}`);
+      console.log(`  SPX: ${marketIndices.spx}, NDX: ${marketIndices.ndx}, KOSPI: ${marketIndices.kospi}, USD/KRW: ${exchangeRate}`);
     }
-  } catch (error) {
-    console.error("Exception storing market indices:", error);
+    } catch (error) {
+      console.error("Exception storing market indices:", error);
+    }
   }
 
   for (const account of accounts) {
@@ -381,7 +393,7 @@ async function capturePortfolioSnapshots(
     }
   }
 
-  return { captured, errors };
+  return { captured, errors, indicesStored };
 }
 
 // ============================================
@@ -446,7 +458,7 @@ serve(async (req: Request) => {
       marketIndices
     );
     console.log(
-      `Snapshots: ${snapshotResult.captured} captured, ${snapshotResult.errors} errors`
+      `Snapshots: ${snapshotResult.captured} captured, ${snapshotResult.errors} errors, market indices: ${snapshotResult.indicesStored ? 'stored' : 'skipped'}`
     );
 
     // Calculate statistics
@@ -464,8 +476,10 @@ serve(async (req: Request) => {
         marked_inactive: inactiveCount,
         snapshots_captured: snapshotResult.captured,
         snapshot_errors: snapshotResult.errors,
+        market_indices_stored: snapshotResult.indicesStored,
       },
       exchange_rate: exchangeRate,
+      market_indices: marketIndices,
       details: {
         krw_tickers: priceResults.filter((r) => r.currency === "KRW").length,
         usd_tickers: priceResults.filter((r) => r.currency === "USD").length,

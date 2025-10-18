@@ -137,7 +137,52 @@ CREATE INDEX IF NOT EXISTS idx_market_indices_date ON market_indices(snapshot_da
 COMMENT ON TABLE market_indices IS 'Daily market indices (S&P 500, NASDAQ 100, KOSPI)';
 
 -- ============================================
--- 6. DATABASE FUNCTIONS
+-- 6. CASH TRANSACTIONS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS cash_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    transaction_type TEXT NOT NULL CHECK (transaction_type IN ('DEPOSIT', 'WITHDRAWAL', 'RP_INTEREST', 'ADJUSTMENT_INCREASE', 'ADJUSTMENT_DECREASE')),
+    currency TEXT NOT NULL CHECK (currency IN ('KRW', 'USD')),
+    amount NUMERIC(20, 2) NOT NULL CHECK (amount > 0),
+    transaction_date DATE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_transactions_account ON cash_transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_cash_transactions_date ON cash_transactions(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_cash_transactions_currency ON cash_transactions(currency);
+CREATE INDEX IF NOT EXISTS idx_cash_transactions_type ON cash_transactions(transaction_type);
+
+COMMENT ON TABLE cash_transactions IS 'Cash deposits, withdrawals, RP interest, and balance adjustments';
+COMMENT ON COLUMN cash_transactions.transaction_type IS 'DEPOSIT (입금), WITHDRAWAL (출금), RP_INTEREST (RP 이자), ADJUSTMENT_INCREASE (예수금 증가 조정), ADJUSTMENT_DECREASE (예수금 감소 조정)';
+COMMENT ON COLUMN cash_transactions.amount IS 'Always positive - transaction type determines direction';
+
+-- Currency restriction trigger for cash_transactions
+CREATE OR REPLACE FUNCTION check_cash_transaction_currency()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM accounts
+        WHERE id = NEW.account_id
+        AND NEW.currency = ANY(allowed_currencies)
+    ) THEN
+        RAISE EXCEPTION 'Currency % is not allowed for this account', NEW.currency;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS validate_cash_transaction_currency ON cash_transactions;
+CREATE TRIGGER validate_cash_transaction_currency
+    BEFORE INSERT OR UPDATE ON cash_transactions
+    FOR EACH ROW
+    EXECUTE FUNCTION check_cash_transaction_currency();
+
+-- ============================================
+-- 7. DATABASE FUNCTIONS
 -- ============================================
 
 -- Get active tickers with holdings
@@ -252,9 +297,9 @@ CREATE OR REPLACE FUNCTION upsert_market_indices(
     p_kospi_close NUMERIC DEFAULT NULL,
     p_usd_krw_rate NUMERIC DEFAULT NULL
 )
-RETURNS UUID AS $$
+RETURNS DATE AS $$
 DECLARE
-    v_id UUID;
+    v_date DATE;
 BEGIN
     INSERT INTO market_indices (snapshot_date, spx_close, ndx_close, kospi_close, usd_krw_rate)
     VALUES (p_snapshot_date, p_spx_close, p_ndx_close, p_kospi_close, p_usd_krw_rate)
@@ -265,9 +310,9 @@ BEGIN
         kospi_close = COALESCE(EXCLUDED.kospi_close, market_indices.kospi_close),
         usd_krw_rate = COALESCE(EXCLUDED.usd_krw_rate, market_indices.usd_krw_rate),
         updated_at = NOW()
-    RETURNING snapshot_date INTO v_id;
+    RETURNING snapshot_date INTO v_date;
 
-    RETURN v_id;
+    RETURN v_date;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -295,13 +340,92 @@ BEGIN
     v_cash_balance := COALESCE(v_initial_seed, 0)
         + COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'DEPOSIT' AND transaction_date <= p_date), 0)
         + COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'RP_INTEREST' AND transaction_date <= p_date), 0)
+        + COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'ADJUSTMENT_INCREASE' AND transaction_date <= p_date), 0)
         - COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'WITHDRAWAL' AND transaction_date <= p_date), 0)
+        - COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'ADJUSTMENT_DECREASE' AND transaction_date <= p_date), 0)
         - COALESCE((SELECT SUM((trade_price * quantity) + COALESCE(fee, 0)) FROM transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'BUY' AND transaction_date <= p_date), 0)
         + COALESCE((SELECT SUM((trade_price * quantity) - COALESCE(fee, 0)) FROM transactions WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'SELL' AND transaction_date <= p_date), 0);
 
     RETURN v_cash_balance;
 END;
 $$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION calculate_cash_balance(UUID, TEXT, DATE) IS 'Calculates cash balance = initial seed + deposits + RP interest + adjustments(+) - withdrawals - adjustments(-) - stock invested + stock sold';
+
+-- 2-param overload of calculate_cash_balance (uses CURRENT_DATE)
+CREATE OR REPLACE FUNCTION calculate_cash_balance(
+    p_account_id UUID,
+    p_currency TEXT
+)
+RETURNS NUMERIC AS $$
+BEGIN
+    RETURN calculate_cash_balance(p_account_id, p_currency, CURRENT_DATE);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Get cash transaction summary for an account
+CREATE OR REPLACE FUNCTION get_cash_transaction_summary(
+    p_account_id UUID,
+    p_currency TEXT
+)
+RETURNS TABLE (
+    initial_seed NUMERIC,
+    total_deposits NUMERIC,
+    total_withdrawals NUMERIC,
+    total_rp_interest NUMERIC,
+    total_adjustments_increase NUMERIC,
+    total_adjustments_decrease NUMERIC,
+    stock_invested NUMERIC,
+    current_cash_balance NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        CASE
+            WHEN p_currency = 'KRW' THEN a.initial_seed_money_krw
+            ELSE a.initial_seed_money_usd
+        END as initial_seed,
+        COALESCE(
+            (SELECT SUM(amount) FROM cash_transactions
+             WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'DEPOSIT'),
+            0
+        ) as total_deposits,
+        COALESCE(
+            (SELECT SUM(amount) FROM cash_transactions
+             WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'WITHDRAWAL'),
+            0
+        ) as total_withdrawals,
+        COALESCE(
+            (SELECT SUM(amount) FROM cash_transactions
+             WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'RP_INTEREST'),
+            0
+        ) as total_rp_interest,
+        COALESCE(
+            (SELECT SUM(amount) FROM cash_transactions
+             WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'ADJUSTMENT_INCREASE'),
+            0
+        ) as total_adjustments_increase,
+        COALESCE(
+            (SELECT SUM(amount) FROM cash_transactions
+             WHERE account_id = p_account_id AND currency = p_currency AND transaction_type = 'ADJUSTMENT_DECREASE'),
+            0
+        ) as total_adjustments_decrease,
+        COALESCE(
+            (SELECT SUM(CASE
+                WHEN transaction_type = 'BUY' THEN (trade_price * quantity) + COALESCE(fee, 0)
+                WHEN transaction_type = 'SELL' THEN -((trade_price * quantity) - COALESCE(fee, 0))
+             END)
+             FROM transactions
+             WHERE account_id = p_account_id AND currency = p_currency),
+            0
+        ) as stock_invested,
+        calculate_cash_balance(p_account_id, p_currency) as current_cash_balance
+    FROM accounts a
+    WHERE a.id = p_account_id;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION get_cash_transaction_summary(UUID, TEXT) IS 'Returns comprehensive cash transaction summary including adjustment types';
 
 -- Get portfolio history for specific account
 CREATE OR REPLACE FUNCTION get_portfolio_history(

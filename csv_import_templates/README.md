@@ -34,6 +34,35 @@ Supabase 콘솔에서 거래 데이터를 CSV로 일괄 입력하는 방법을 �
 - **미국 주식**: 티커만 입력
   - 예: `AAPL` (애플), `MSFT` (마이크로소프트)
 
+## 💰 cash_transactions 테이블 CSV 템플릿
+
+### 필수 컬럼
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| account_id | UUID | 계좌 ID (accounts 테이블에서 확인) | `550e8400-e29b-41d4-a716-446655440000` |
+| transaction_type | TEXT | 거래 유형 (DEPOSIT, WITHDRAWAL, RP_INTEREST, ADJUSTMENT_INCREASE, ADJUSTMENT_DECREASE) | `DEPOSIT` |
+| currency | TEXT | 통화 (KRW 또는 USD) | `KRW` |
+| amount | NUMERIC | 금액 (항상 양수) | `10000` |
+| transaction_date | DATE | 거래 날짜 (YYYY-MM-DD) | `2025-01-15` |
+| description | TEXT | 설명 (선택사항) | `Additional investment` |
+
+### transaction_type 설명
+
+- **DEPOSIT**: 입금 (초기 투자금 외 추가 입금)
+- **WITHDRAWAL**: 출금 (수익 인출 등)
+- **RP_INTEREST**: RP 이자 수익 (매일 발생하는 이자)
+- **ADJUSTMENT_INCREASE**: 예수금 증가 조정 (소수점 오차, 매매차익 등)
+- **ADJUSTMENT_DECREASE**: 예수금 감소 조정 (소수점 오차, 환율 차이 등)
+
+### 사용 시나리오
+
+**예수금 조정 (ADJUSTMENT_INCREASE / ADJUSTMENT_DECREASE):**
+- 매매 시 소수점 이하 금액 차이 발생
+- 환율 차이로 인한 미세 조정
+- 수수료 계산 오차 보정
+- 실제 잔고와 계산 잔고의 차이 조정
+
 ## 🔧 Supabase에서 CSV Import 방법
 
 ### 1. 계좌 ID 확인

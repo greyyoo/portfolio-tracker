@@ -322,6 +322,8 @@ def get_cash_transaction_summary(supabase: Client, account_id: str, currency: st
             'total_deposits': 총 입금액,
             'total_withdrawals': 총 출금액,
             'total_rp_interest': 총 RP 이자,
+            'total_adjustments_increase': 총 조정(+),
+            'total_adjustments_decrease': 총 조정(-),
             'stock_invested': 주식 투자금,
             'current_cash_balance': 현재 현금 잔고
         }
@@ -340,6 +342,8 @@ def get_cash_transaction_summary(supabase: Client, account_id: str, currency: st
                 'total_deposits': float(result.get('total_deposits', 0)),
                 'total_withdrawals': float(result.get('total_withdrawals', 0)),
                 'total_rp_interest': float(result.get('total_rp_interest', 0)),
+                'total_adjustments_increase': float(result.get('total_adjustments_increase', 0)),
+                'total_adjustments_decrease': float(result.get('total_adjustments_decrease', 0)),
                 'stock_invested': float(result.get('stock_invested', 0)),
                 'current_cash_balance': float(result.get('current_cash_balance', 0))
             }
@@ -352,6 +356,8 @@ def get_cash_transaction_summary(supabase: Client, account_id: str, currency: st
         'total_deposits': 0.0,
         'total_withdrawals': 0.0,
         'total_rp_interest': 0.0,
+        'total_adjustments_increase': 0.0,
+        'total_adjustments_decrease': 0.0,
         'stock_invested': 0.0,
         'current_cash_balance': 0.0
     }

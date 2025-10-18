@@ -4,6 +4,263 @@
 
 ---
 
+## [0.1.4] - 2025-10-18
+
+### 🚀 새로운 기능
+
+#### 예수금 조정 타입 추가
+- **새로운 transaction_type**: `ADJUSTMENT_INCREASE`, `ADJUSTMENT_DECREASE`
+  - **목적**: 매매 시 발생하는 소수점 금액 차이를 조정
+  - **사용 시나리오**:
+    - 매매 시 소수점 이하 금액 차이 발생
+    - 환율 차이로 인한 미세 조정
+    - 수수료 계산 오차 보정
+    - 실제 잔고와 계산 잔고의 차이 조정
+
+#### UI 개선 - 현금 내역 탭
+- **요약 섹션 확장**: 4-column → 6-column
+  - 새로 추가된 메트릭: "조정(+)", "조정(-)"
+- **거래 테이블 업데이트**:
+  - 새로운 유형 표시: '조정(+)', '조정(-)'
+  - 색상 코딩: 조정(+) 주황색, 조정(-) 진한 주황색
+- **누적 잔고 계산 로직**: 조정 타입 반영
+
+### 🐛 버그 수정
+
+#### Market Indices 저장 실패 문제 해결 (CRITICAL)
+- **문제**: `upsert_market_indices()` 함수의 반환 타입 불일치
+  - 함수 선언: `RETURNS UUID`
+  - 실제 반환: `DATE` 값 (snapshot_date)
+  - 결과: PostgreSQL 타입 변환 오류로 함수 호출 실패
+- **영향**:
+  - Edge Function이 매시간 실행되지만 market indices 데이터가 DB에 저장되지 않음
+  - SPX, NDX, KOSPI, USD/KRW 환율 데이터 누락
+  - Statistics 페이지의 정규화 성과 비교 차트 데이터 없음
+- **수정 내용**:
+  - `upsert_market_indices()` 반환 타입: `UUID` → `DATE`
+  - 변수 선언: `v_id UUID` → `v_date DATE`
+  - Edge Function 에러 핸들링 개선: 반환값 캡처 및 상세 로깅
+  - Response summary에 `market_indices_stored` 상태 추가
+- **파일 수정**:
+  - `complete_schema.sql`: 함수 반환 타입 수정 (UUID → DATE)
+  - `supabase/functions/update-stock-prices/index.ts`: 에러 핸들링 강화
+  - `CLAUDE.md`: 함수 시그니처 문서 업데이트
+
+#### Edge Function 변수 스코프 오류 수정
+- **문제**: `indicesStored` 변수 스코프 문제로 500 오류 발생
+  - 변수가 `capturePortfolioSnapshots()` 함수 내부에서만 선언됨
+  - main handler의 summary에서 참조 시 "not defined" 오류
+- **수정 내용**:
+  - `capturePortfolioSnapshots()` 반환 타입에 `indicesStored: boolean` 추가
+  - 함수에서 `indicesStored` 값 반환
+  - main handler에서 `snapshotResult.indicesStored` 사용
+- **파일 수정**:
+  - `supabase/functions/update-stock-prices/index.ts`: 함수 시그니처 및 반환값 수정
+
+#### 주말 데이터 저장 제외
+- **개선**: Edge Function이 주말에는 market indices를 저장하지 않도록 수정
+  - 시장이 열리지 않는 토요일(6), 일요일(0) 자동 감지
+  - UTC 기준 요일 체크 (`now.getUTCDay()`)
+  - 주말 감지 시 로그 출력: `⏭️ Skipping market indices storage (weekend: day X)`
+- **파일 수정**:
+  - `supabase/functions/update-stock-prices/index.ts`: 주말 체크 로직 추가
+
+#### 과거 Market Indices 데이터 채우기 스크립트 (NEW)
+- **목적**: 누락된 과거 시장 지수 데이터를 일괄 업데이트
+- **기능**:
+  - Yahoo Finance API를 통한 과거 데이터 자동 수집
+  - SPX, NDX, KOSPI, USD/KRW 환율 동시 처리
+  - 주말 데이터 자동 제외
+  - 기존 데이터 보호 (COALESCE 사용, NULL 값만 업데이트)
+  - Dry-run 모드 지원 (시뮬레이션)
+  - 상세한 로깅 및 통계 제공
+- **사용법**:
+  ```bash
+  # 시뮬레이션
+  python backfill_market_indices.py --start-date 2025-10-01 --dry-run
+
+  # 실제 데이터 저장
+  python backfill_market_indices.py --start-date 2025-10-01 --end-date 2025-10-17
+  ```
+- **파일 생성**:
+  - `backfill_market_indices.py`: 백필 스크립트 (NEW)
+  - `MARKET_INDICES_BACKFILL_GUIDE.md`: 상세 사용 가이드 (NEW)
+
+### 🗃️ 데이터베이스 스키마 변경
+
+#### cash_transactions 테이블
+- **transaction_type CHECK constraint 업데이트**:
+  ```sql
+  CHECK (transaction_type IN ('DEPOSIT', 'WITHDRAWAL', 'RP_INTEREST', 'ADJUSTMENT_INCREASE', 'ADJUSTMENT_DECREASE'))
+  ```
+
+#### 데이터베이스 함수 업데이트
+- **calculate_cash_balance()** (3-param 버전):
+  - ADJUSTMENT_INCREASE 금액 추가
+  - ADJUSTMENT_DECREASE 금액 차감
+- **get_cash_transaction_summary()**:
+  - 새로운 반환 필드: `total_adjustments_increase`, `total_adjustments_decrease`
+
+### 🔧 백엔드 수정
+
+**파일별 변경사항:**
+
+1. **complete_schema.sql**:
+   - cash_transactions 테이블 정의 추가 (전체 5가지 타입 포함)
+   - calculate_cash_balance() 함수: 조정 타입 처리 로직 추가
+   - get_cash_transaction_summary() 함수: 조정 필드 2개 추가
+   - upsert_market_indices() 함수: 반환 타입 UUID → DATE 수정
+
+2. **database.py**:
+   - get_cash_transaction_summary() 반환값 2개 추가
+   - float 타입 변환으로 일관성 유지
+
+3. **app.py**:
+   - 현금 내역 탭 요약 섹션: 6-column 레이아웃
+   - 거래 유형 매핑: 조정(+), 조정(-) 추가
+   - 색상 스타일: orange, darkorange 적용
+   - 누적 잔고 계산: 조정 타입 반영
+
+4. **supabase/functions/update-stock-prices/index.ts**:
+   - market indices 저장 시 반환값 캡처
+   - 성공 시 상세 로깅 (저장된 날짜, 인덱스 값)
+   - Response summary에 market_indices_stored 필드 추가
+   - market_indices 데이터 포함
+
+### 📄 문서 업데이트
+
+1. **csv_import_templates/cash_transactions_template.csv**:
+   - ADJUSTMENT_INCREASE, ADJUSTMENT_DECREASE 예시 추가
+
+2. **csv_import_templates/README.md**:
+   - cash_transactions 섹션 추가
+   - transaction_type 5가지 타입 설명
+   - 사용 시나리오 가이드
+
+3. **CLAUDE.md**:
+   - cash_transactions 테이블 설명 확장
+   - 5가지 transaction_type 상세 설명
+   - Use Cases 섹션 추가
+
+### 🛠️ 마이그레이션 가이드
+
+**기존 데이터베이스 업데이트 방법:**
+
+#### 옵션 1: 전체 스키마 재생성 (권장)
+```sql
+-- Supabase SQL Editor에서 complete_schema.sql 전체 실행
+-- 모든 테이블, 함수, 트리거가 최신 상태로 업데이트됩니다
+```
+
+#### 옵션 2: 개별 업데이트
+
+**1. 예수금 조정 타입 추가:**
+```sql
+-- cash_transactions 테이블 constraint 업데이트
+ALTER TABLE cash_transactions
+DROP CONSTRAINT IF EXISTS cash_transactions_transaction_type_check;
+
+ALTER TABLE cash_transactions
+ADD CONSTRAINT cash_transactions_transaction_type_check
+CHECK (transaction_type IN ('DEPOSIT', 'WITHDRAWAL', 'RP_INTEREST', 'ADJUSTMENT_INCREASE', 'ADJUSTMENT_DECREASE'));
+```
+
+**2. Market Indices 함수 수정 (CRITICAL):**
+```sql
+-- upsert_market_indices 함수 재생성 (UUID → DATE 반환 타입)
+DROP FUNCTION IF EXISTS upsert_market_indices(DATE, NUMERIC, NUMERIC, NUMERIC, NUMERIC);
+
+CREATE OR REPLACE FUNCTION upsert_market_indices(
+    p_snapshot_date DATE,
+    p_spx_close NUMERIC DEFAULT NULL,
+    p_ndx_close NUMERIC DEFAULT NULL,
+    p_kospi_close NUMERIC DEFAULT NULL,
+    p_usd_krw_rate NUMERIC DEFAULT NULL
+)
+RETURNS DATE AS $$
+DECLARE
+    v_date DATE;
+BEGIN
+    INSERT INTO market_indices (snapshot_date, spx_close, ndx_close, kospi_close, usd_krw_rate)
+    VALUES (p_snapshot_date, p_spx_close, p_ndx_close, p_kospi_close, p_usd_krw_rate)
+    ON CONFLICT (snapshot_date)
+    DO UPDATE SET
+        spx_close = COALESCE(EXCLUDED.spx_close, market_indices.spx_close),
+        ndx_close = COALESCE(EXCLUDED.ndx_close, market_indices.ndx_close),
+        kospi_close = COALESCE(EXCLUDED.kospi_close, market_indices.kospi_close),
+        usd_krw_rate = COALESCE(EXCLUDED.usd_krw_rate, market_indices.usd_krw_rate),
+        updated_at = NOW()
+    RETURNING snapshot_date INTO v_date;
+
+    RETURN v_date;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+```
+
+**검증:**
+```sql
+-- 함수가 정상 작동하는지 테스트
+SELECT upsert_market_indices(CURRENT_DATE, 5000.0, 17000.0, 2600.0, 1320.0);
+
+-- 데이터가 저장되었는지 확인
+SELECT * FROM market_indices WHERE snapshot_date = CURRENT_DATE;
+```
+
+**Edge Function 재배포 (REQUIRED):**
+```bash
+# 프로젝트 디렉토리로 이동
+cd /Users/greyyoo/Desktop/trading
+
+# 수정된 Edge Function 배포
+supabase functions deploy update-stock-prices
+
+# 로그 확인 (market indices 저장 성공 메시지 확인)
+supabase functions logs update-stock-prices
+
+# 출력 예시 (평일):
+# ✓ Market indices stored successfully for 2025-10-18
+#   SPX: 5000.0, NDX: 17000.0, KOSPI: 2600.0, USD/KRW: 1320.0
+# Snapshots: 5 captured, 0 errors, market indices: stored
+
+# 출력 예시 (주말):
+# ⏭️  Skipping market indices storage (weekend: day 6)
+# Snapshots: 5 captured, 0 errors, market indices: skipped
+```
+
+#### 3. 과거 누락 데이터 채우기 (선택)
+```bash
+# 1. 시뮬레이션으로 확인
+python backfill_market_indices.py \
+  --start-date 2025-10-01 \
+  --end-date 2025-10-17 \
+  --dry-run
+
+# 2. 실제 데이터 저장
+python backfill_market_indices.py \
+  --start-date 2025-10-01 \
+  --end-date 2025-10-17
+
+# 3. Supabase에서 데이터 확인
+# SELECT * FROM market_indices WHERE snapshot_date >= '2025-10-01' ORDER BY snapshot_date;
+```
+
+**상세 가이드**: `MARKET_INDICES_BACKFILL_GUIDE.md` 참고
+
+### 📊 영향 범위
+
+**수정된 파일** (총 9개):
+- `complete_schema.sql` - 모든 DB 스키마 및 함수 최신화
+- `supabase/functions/update-stock-prices/index.ts` - 주말 체크 및 에러 핸들링
+- `backfill_market_indices.py` (NEW) - 과거 데이터 백필 스크립트
+- `MARKET_INDICES_BACKFILL_GUIDE.md` (NEW) - 백필 사용 가이드
+- `database.py` - 함수 반환값 업데이트
+- `app.py` - UI 6-column 레이아웃
+- `csv_import_templates/cash_transactions_template.csv` - 예시 데이터 추가
+- `csv_import_templates/README.md` - 문서 업데이트
+- `CHANGELOG.md` - 변경 이력
+
+---
+
 ## [0.1.3] - 2025-10-15
 
 ### 🐛 긴급 수정 (Hotfix)
@@ -34,7 +291,6 @@
   - **영향**: Python 앱과 Edge Function의 현금 잔고 계산 정상화
   - **파일**:
     - `complete_schema.sql`: 함수 정의 추가
-    - `sql_archive/fix_calculate_cash_balance_overload.sql`: 독립 실행 스크립트
 
 ### 🚀 데이터베이스 개선
 
@@ -99,12 +355,15 @@
 - `exchange_rate.py`: `get_historical_usd_krw_rate()` 함수 추가
 - `supabase/functions/update-stock-prices/index.ts`: market_indices에 환율 저장
 
-**추가된 파일**:
-- `sql_archive/fix_calculate_cash_balance_overload.sql`: 함수 오버로드 독립 실행 스크립트
-
 ### 🔧 데이터베이스 마이그레이션
 
-**필수 실행 SQL**:
+**옵션 1: 전체 스키마 재생성 (권장)**:
+```sql
+-- Supabase SQL Editor에서 complete_schema.sql 전체 실행
+-- 모든 변경사항이 최신 상태로 반영됩니다
+```
+
+**옵션 2: 개별 마이그레이션**:
 ```sql
 -- 1. market_indices 테이블에 환율 컬럼 추가
 ALTER TABLE market_indices ADD COLUMN IF NOT EXISTS usd_krw_rate NUMERIC(10, 4);
@@ -119,12 +378,6 @@ BEGIN
     RETURN calculate_cash_balance(p_account_id, p_currency, CURRENT_DATE);
 END;
 $$ LANGUAGE plpgsql;
-```
-
-또는 스크립트 실행:
-```bash
-# Supabase SQL Editor에서 실행
-sql_archive/fix_calculate_cash_balance_overload.sql
 ```
 
 ---
