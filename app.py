@@ -977,9 +977,9 @@ def show_account_page(supabase: Client, account_number: int):
                 if not currency_txns.empty:
                     # 초기 시드 머니
                     if currency == 'KRW':
-                        initial_seed = account_info['initial_seed_money_krw']
+                        initial_seed = account['initial_seed_money_krw']
                     else:
-                        initial_seed = account_info['initial_seed_money_usd']
+                        initial_seed = account['initial_seed_money_usd']
 
                     running_balance = initial_seed
 

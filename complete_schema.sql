@@ -418,7 +418,7 @@ BEGIN
              FROM transactions
              WHERE account_id = p_account_id AND currency = p_currency),
             0
-        ) as stock_invested,
+        )::NUMERIC as stock_invested,
         calculate_cash_balance(p_account_id, p_currency) as current_cash_balance
     FROM accounts a
     WHERE a.id = p_account_id;
