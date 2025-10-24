@@ -34,7 +34,8 @@ from calculations import (
     calculate_closed_positions,
     calculate_win_rate,
     add_current_prices_to_holdings,
-    get_current_prices_from_cache
+    get_current_prices_from_cache,
+    calculate_cumulative_realized_pl_by_date
 )
 from currency_utils import (
     format_currency,
@@ -1398,6 +1399,15 @@ def show_statistics_page(supabase: Client):
                 # 개별 계좌 차트용: 주 통화 기준
                 account_by_date = {}
 
+                # 날짜별 누적 실현손익 계산 (신규 추가)
+                dates_list = sorted(account_snapshots['snapshot_date'].unique())
+                account_txns = get_transactions_by_account(supabase, account_id)
+                cumulative_realized_pl = calculate_cumulative_realized_pl_by_date(
+                    account_txns,
+                    account_id,
+                    dates_list
+                )
+
                 for date, group in account_snapshots.groupby('snapshot_date'):
                     # exchange_rate 가져오기 (해당 날짜의 실제 환율)
                     # 1. 스냅샷에 저장된 환율 우선 사용
@@ -1448,28 +1458,40 @@ def show_statistics_page(supabase: Client):
                         else:  # USD
                             total_value_usd += total_val
 
+                    # 누적 실현손익 가져오기 (해당 날짜까지의 누적값)
+                    realized_pl = cumulative_realized_pl.get(date, 0.0)
+
                     # 개별 계좌 차트: 주 통화 기준으로 저장
                     if primary_currency == 'USD':
                         # USD 계좌: USD로 표시
+                        principal = principal_usd + (principal_krw / exchange_rate)
                         account_by_date[date] = {
                             'total_value': total_value_usd + (total_value_krw / exchange_rate),
-                            'principal': principal_usd + (principal_krw / exchange_rate),
+                            'principal': principal,
+                            'realized_pl_principal': principal + realized_pl,  # 실현손익 반영 원금
                             'currency': 'USD'
                         }
                     else:
                         # KRW 계좌: KRW로 표시
+                        principal = principal_krw + (principal_usd * exchange_rate)
                         account_by_date[date] = {
                             'total_value': total_value_krw + (total_value_usd * exchange_rate),
-                            'principal': principal_krw + (principal_usd * exchange_rate),
+                            'principal': principal,
+                            'realized_pl_principal': principal + realized_pl,  # 실현손익 반영 원금
                             'currency': 'KRW'
                         }
 
                     # 전체 포트폴리오용: 일별 환율 반영하여 KRW로 통합
                     if date not in total_portfolio_data:
-                        total_portfolio_data[date] = {'total_value': 0, 'principal': 0}
+                        total_portfolio_data[date] = {'total_value': 0, 'principal': 0, 'realized_pl_principal': 0}
 
                     total_portfolio_data[date]['total_value'] += total_value_krw + (total_value_usd * exchange_rate)
                     total_portfolio_data[date]['principal'] += principal_krw + (principal_usd * exchange_rate)
+
+                    # realized_pl을 환율 변환하여 KRW로 합산
+                    # 계좌의 주 통화가 USD면 환율 적용, KRW면 그대로
+                    realized_pl_krw = realized_pl * exchange_rate if primary_currency == 'USD' else realized_pl
+                    total_portfolio_data[date]['realized_pl_principal'] += (principal_krw + (principal_usd * exchange_rate)) + realized_pl_krw
 
                 account_charts_data.append({
                     'account_name': account_name,
@@ -1485,28 +1507,30 @@ def show_statistics_page(supabase: Client):
 
                 for col_idx, chart_data in enumerate(account_charts_data[i:i+2]):
                     with cols[col_idx]:
-                        # 데이터 준비
+                        # 데이터 준비 (3개 라인)
                         dates = sorted(chart_data['data'].keys())
                         total_values = [chart_data['data'][d]['total_value'] for d in dates]
                         principals = [chart_data['data'][d]['principal'] for d in dates]
+                        realized_pl_principals = [chart_data['data'][d]['realized_pl_principal'] for d in dates]
                         currency = chart_data['currency']
 
-                        # DataFrame 생성
+                        # DataFrame 생성 (3개 라인)
                         chart_df = pd.DataFrame({
-                            'Date': dates * 2,
-                            'Type': ['계좌평가액'] * len(dates) + ['원금'] * len(dates),
-                            'Value': total_values + principals
+                            'Date': dates * 3,
+                            'Type': ['계좌평가액'] * len(dates) + ['실현손익 반영 원금'] * len(dates) + ['원금'] * len(dates),
+                            'Value': total_values + realized_pl_principals + principals
                         })
 
                         # 통화에 따른 레이블 및 포맷
+                        all_values = total_values + realized_pl_principals + principals
                         if currency == 'USD':
                             value_label = '금액 (USD)'
-                            tick_format = "$,.0f" if max(total_values + principals) >= 1000 else "$,.2f"
+                            tick_format = "$,.0f" if max(all_values) >= 1000 else "$,.2f"
                         else:
                             value_label = '금액 (KRW)'
                             tick_format = ",.0f"
 
-                        # Plotly 차트
+                        # Plotly 차트 (3개 라인, 색상 지정)
                         fig_account = px.line(
                             chart_df,
                             x='Date',
@@ -1514,7 +1538,11 @@ def show_statistics_page(supabase: Client):
                             color='Type',
                             title=chart_data['account_name'],
                             labels={'Date': '날짜', 'Value': value_label, 'Type': '구분'},
-                            color_discrete_map={'계좌평가액': '#2e7d32', '원금': '#1976d2'}
+                            color_discrete_map={
+                                '원금': '#1976d2',              # 파랑
+                                '실현손익 반영 원금': '#ff9800',  # 주황
+                                '계좌평가액': '#2e7d32'          # 초록
+                            }
                         )
 
                         fig_account.update_layout(
@@ -1538,19 +1566,20 @@ def show_statistics_page(supabase: Client):
             st.markdown("#### 전체 포트폴리오 (일별 환율 반영)")
 
             # 전체 포트폴리오 데이터는 이미 계산됨 (total_portfolio_data)
-            # 데이터 준비
+            # 데이터 준비 (3개 라인)
             dates = sorted(total_portfolio_data.keys())
             total_values = [total_portfolio_data[d]['total_value'] for d in dates]
             principals = [total_portfolio_data[d]['principal'] for d in dates]
+            realized_pl_principals = [total_portfolio_data[d]['realized_pl_principal'] for d in dates]
 
-            # DataFrame 생성
+            # DataFrame 생성 (3개 라인)
             total_chart_df = pd.DataFrame({
-                'Date': dates * 2,
-                'Type': ['계좌평가액'] * len(dates) + ['원금'] * len(dates),
-                'Value': total_values + principals
+                'Date': dates * 3,
+                'Type': ['계좌평가액'] * len(dates) + ['실현손익 반영 원금'] * len(dates) + ['원금'] * len(dates),
+                'Value': total_values + realized_pl_principals + principals
             })
 
-            # Plotly 차트
+            # Plotly 차트 (3개 라인, 색상 지정)
             fig_total = px.line(
                 total_chart_df,
                 x='Date',
@@ -1558,7 +1587,11 @@ def show_statistics_page(supabase: Client):
                 color='Type',
                 title='전체 포트폴리오',
                 labels={'Date': '날짜', 'Value': '금액 (KRW)', 'Type': '구분'},
-                color_discrete_map={'계좌평가액': '#2e7d32', '원금': '#1976d2'}
+                color_discrete_map={
+                    '원금': '#1976d2',              # 파랑
+                    '실현손익 반영 원금': '#ff9800',  # 주황
+                    '계좌평가액': '#2e7d32'          # 초록
+                }
             )
 
             fig_total.update_layout(

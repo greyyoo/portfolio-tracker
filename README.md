@@ -435,4 +435,4 @@ A: 수동으로 Edge Function을 실행해보세요:
 
 **Built with ❤️ using Streamlit and Supabase**
 
-**최종 업데이트**: 2025-10-15 | **버전**: 0.1.2
+**최종 업데이트**: 2025-10-24 | **버전**: 0.1.5

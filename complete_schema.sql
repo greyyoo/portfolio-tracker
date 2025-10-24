@@ -478,8 +478,27 @@ BEGIN
     RETURN QUERY
     SELECT
         ps.snapshot_date,
-        SUM(ps.total_value) as total_value,
-        SUM(ps.value_change) as total_value_change,
+        -- USD와 KRW를 올바르게 합산 (환율 변환 적용)
+        SUM(
+            CASE
+                WHEN ps.currency = 'USD' THEN
+                    -- USD인 경우 exchange_rate를 곱해서 KRW로 변환
+                    ps.total_value * COALESCE(ps.exchange_rate, 1400)
+                ELSE
+                    -- KRW인 경우 그대로 사용
+                    ps.total_value
+            END
+        ) as total_value,
+        -- value_change도 동일하게 변환
+        SUM(
+            CASE
+                WHEN ps.currency = 'USD' THEN
+                    ps.value_change * COALESCE(ps.exchange_rate, 1400)
+                ELSE
+                    ps.value_change
+            END
+        ) as total_value_change,
+        -- 평균 변화율은 그대로 유지
         AVG(ps.change_pct) as avg_change_pct
     FROM portfolio_snapshots ps
     WHERE ps.snapshot_date >= CURRENT_DATE - p_days
@@ -487,6 +506,8 @@ BEGIN
     ORDER BY ps.snapshot_date ASC;
 END;
 $$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION get_aggregate_portfolio_history IS '전체 계좌 통합 포트폴리오 이력 조회 (USD를 KRW로 변환하여 합산)';
 
 -- Recalculate snapshots for a date range
 CREATE OR REPLACE FUNCTION recalculate_snapshots(

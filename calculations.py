@@ -573,3 +573,55 @@ def get_current_prices_from_cache(
             }
 
     return result
+
+
+def calculate_cumulative_realized_pl_by_date(
+    transactions_df: pd.DataFrame,
+    account_id: str,
+    dates: List[pd.Timestamp]
+) -> Dict[pd.Timestamp, float]:
+    """
+    날짜별 누적 실현손익 계산
+
+    청산된 포지션의 realized_pl을 last_trade_date 기준으로 누적 계산
+
+    Args:
+        transactions_df: 거래 내역 DataFrame
+        account_id: 계좌 ID
+        dates: 계산할 날짜 리스트 (pd.Timestamp 타입)
+
+    Returns:
+        {date: cumulative_realized_pl} 딕셔너리
+
+    Example:
+        dates = [pd.Timestamp('2025-10-13'), pd.Timestamp('2025-10-14'), ...]
+        result = {
+            pd.Timestamp('2025-10-13'): 0,
+            pd.Timestamp('2025-10-14'): 500.0,  # 이 날까지 +$500 실현
+            pd.Timestamp('2025-10-15'): 300.0,  # 이 날까지 +$300 실현 (누적 재계산)
+            ...
+        }
+    """
+    # 청산된 포지션 계산
+    closed_positions = calculate_closed_positions(transactions_df, account_id)
+
+    if closed_positions.empty:
+        # 청산된 포지션이 없으면 모든 날짜에 0 반환
+        return {date: 0.0 for date in dates}
+
+    # last_trade_date를 datetime으로 변환
+    closed_positions['last_trade_date'] = pd.to_datetime(closed_positions['last_trade_date'])
+
+    # 각 날짜별로 그 날짜까지의 누적 실현손익 계산
+    cumulative_realized_pl = {}
+
+    for date in dates:
+        # 해당 날짜 이전 또는 당일에 청산된 포지션들만 필터링
+        closed_until_date = closed_positions[closed_positions['last_trade_date'] <= date]
+
+        # realized_pl 합산 (통화 구분 없이 합산 - 같은 계좌는 같은 통화)
+        total_realized_pl = closed_until_date['realized_pl'].sum() if not closed_until_date.empty else 0.0
+
+        cumulative_realized_pl[date] = float(total_realized_pl)
+
+    return cumulative_realized_pl
